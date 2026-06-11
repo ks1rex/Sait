@@ -245,7 +245,12 @@ async def list_templates(user: CurrentUser) -> List[TemplateInfo]:
         return []
     try:
         data = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
-        return [TemplateInfo(**item) for item in data]
+        # Only expose templates whose spec_file is present on disk
+        return [
+            TemplateInfo(**item)
+            for item in data
+            if (_TEMPLATES_DIR / "specs" / item.get("spec_file", "")).exists()
+        ]
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
