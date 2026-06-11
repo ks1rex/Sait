@@ -5,19 +5,22 @@ All business logic lives in dedicated modules (pdf_extract, calc_engine, etc.).
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import uuid
 from typing import Annotated, Dict, List, Optional
 
 import fitz
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
+from fastapi import Body, Depends, FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt as jose_jwt
 from pydantic import BaseModel, Field, ValidationError
 
-from .ai_provider import AI_PROVIDER, extract_calculation_spec
+from .ai_provider import AI_PROVIDER, extract_calculation_spec, generate_conclusion
+from .calc_engine import CalcError, run_calculation
+from .docx_generator import generate_docx
 from .pdf_extract import extract_text_and_tables
 from .schemas import CalculationSpec
 from .supabase_client import get_supabase
@@ -120,7 +123,8 @@ class GenerateRequest(BaseModel):
 class GenerateResponse(BaseModel):
     project_id: str
     docx_url: str
-    pdf_url: str
+    pdf_url: Optional[str] = None
+    warning: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -550,25 +554,247 @@ async def update_spec(project_id: str, spec: CalculationSpec, user: CurrentUser)
 
 
 @app.post("/compute", response_model=ComputeResponse, tags=["projects"])
-async def compute(body: ComputeRequest, user: CurrentUser) -> ComputeResponse:
+async def compute(
+    project_id: Annotated[str, Query(description="ID проекта")],
+    user: CurrentUser,
+) -> ComputeResponse:
     """
-    Запускает расчётный движок (calc_engine.py) по сохранённой спецификации.
-    Не обращается к AI — использует уже проверенную пользователем спецификацию.
+    Запускает расчётный движок по текущей (возможно, отредактированной)
+    спецификации. Сохраняет step.value и conclusion_text обратно в БД.
+    Не обращается к AI для расчёта — только для генерации заключения.
     """
-    # TODO: загрузить спецификацию из БД + проверить ownership
-    # TODO: from .calc_engine import run_calculation
-    #       results = run_calculation(spec)
-    # TODO: сохранить обновлённую spec обратно в БД
-    # TODO: return ComputeResponse(project_id=body.project_id, results=results)
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="Not implemented")
+    db = get_supabase()
+    user_id: str = user["user_id"]
+
+    # 1. Verify ownership
+    _require_project(project_id, user_id)
+
+    # 2. Load current spec (includes any user edits from PUT /spec)
+    result = (
+        db.table("calculation_specs")
+        .select("spec_json")
+        .eq("project_id", project_id)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "Спецификация не найдена. Сначала выполните /extract."},
+        )
+    spec = CalculationSpec.model_validate(result.data[0]["spec_json"])
+
+    # 3. Run calculation engine (mutates spec.sections[*].steps[*].value in place)
+    try:
+        results = run_calculation(spec)
+    except CalcError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": str(exc), "step_id": exc.step_id},
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": f"Ошибка расчёта: {exc}"},
+        )
+
+    # 4. Generate conclusion via AI (non-fatal — report succeeds without it)
+    try:
+        spec.conclusion_text = generate_conclusion(spec.model_dump(), results)
+    except Exception:
+        spec.conclusion_text = None
+
+    # 5. Persist updated spec (with computed values and conclusion)
+    db.table("calculation_specs").update(
+        {"spec_json": spec.model_dump()}
+    ).eq("project_id", project_id).execute()
+
+    # 6. Update project status
+    db.table("projects").update({"status": "computed"}).eq("id", project_id).execute()
+
+    return ComputeResponse(project_id=project_id, results=results)
+
+
+_SOFFICE_TIMEOUT = 90  # seconds
 
 
 @app.post("/generate", response_model=GenerateResponse, tags=["projects"])
-async def generate(body: GenerateRequest, user: CurrentUser) -> GenerateResponse:
+async def generate(
+    project_id: Annotated[str, Query(description="ID проекта")],
+    user: CurrentUser,
+    meta: Annotated[GenerateMeta, Body()] = GenerateMeta(),
+) -> GenerateResponse:
     """
-    Генерирует .docx (docx_generator.py) и конвертирует в .pdf
-    (LibreOffice headless), загружает оба файла в Supabase Storage «outputs».
+    Генерирует .docx через docx_generator и конвертирует в .pdf через
+    LibreOffice headless. Загружает оба файла в bucket «outputs».
+    Если LibreOffice недоступен — возвращает только docx с предупреждением
+    в поле warning.
     """
-    # TODO: загрузить спецификацию + проверить, что /compute был запущен
-    # TODO: генерация docx + конвертация + выгрузка в outputs
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="Not implemented")
+    db = get_supabase()
+    user_id: str = user["user_id"]
+
+    # 1. Verify ownership and check status
+    project = _require_project(project_id, user_id)
+    if project["status"] not in ("computed", "done"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": (
+                    "Расчёт ещё не выполнен. "
+                    "Сначала выполните /compute."
+                )
+            },
+        )
+
+    # 2. Load computed spec
+    result = (
+        db.table("calculation_specs")
+        .select("spec_json")
+        .eq("project_id", project_id)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "Спецификация не найдена."},
+        )
+    spec = CalculationSpec.model_validate(result.data[0]["spec_json"])
+
+    # 3. Guard: all steps must have computed values
+    uncomputed = [
+        step.id
+        for section in spec.sections
+        for step in section.steps
+        if step.value is None
+    ]
+    if uncomputed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "Не все шаги вычислены. Выполните /compute заново.",
+                "uncomputed_steps": uncomputed,
+            },
+        )
+
+    storage_prefix = f"{user_id}/{project_id}"
+    docx_storage_path = f"{storage_prefix}/report.docx"
+    pdf_storage_path: Optional[str] = None
+    pdf_warning: Optional[str] = None
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        docx_path = os.path.join(tmp_dir, "report.docx")
+
+        # 4. Generate .docx
+        try:
+            generate_docx(spec, meta.model_dump(), docx_path)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": f"Ошибка генерации docx: {exc}"},
+            )
+
+        # 5. Convert to .pdf via LibreOffice headless (optional)
+        pdf_path = os.path.join(tmp_dir, "report.pdf")
+        try:
+            subprocess.run(
+                [
+                    "soffice",
+                    "--headless",
+                    "--convert-to", "pdf",
+                    "--outdir", tmp_dir,
+                    docx_path,
+                ],
+                check=True,
+                capture_output=True,
+                timeout=_SOFFICE_TIMEOUT,
+            )
+            if not os.path.exists(pdf_path):
+                pdf_warning = "LibreOffice не создал PDF-файл (проверьте установку)."
+                pdf_path = None
+        except FileNotFoundError:
+            pdf_warning = (
+                "LibreOffice (soffice) не установлен на сервере. "
+                "PDF-версия недоступна — скачайте .docx и конвертируйте самостоятельно."
+            )
+            pdf_path = None
+        except subprocess.TimeoutExpired:
+            pdf_warning = f"Конвертация в PDF превысила таймаут ({_SOFFICE_TIMEOUT} с)."
+            pdf_path = None
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.decode(errors="replace")[:300] if exc.stderr else ""
+            pdf_warning = f"Ошибка LibreOffice при конвертации: {stderr}"
+            pdf_path = None
+
+        # 6. Upload .docx to Storage (upsert — allow regeneration)
+        with open(docx_path, "rb") as f:
+            docx_bytes = f.read()
+        try:
+            db.storage.from_("outputs").upload(
+                path=docx_storage_path,
+                file=docx_bytes,
+                file_options={
+                    "content-type": (
+                        "application/vnd.openxmlformats-officedocument"
+                        ".wordprocessingml.document"
+                    ),
+                    "upsert": "true",
+                },
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": f"Ошибка загрузки docx в хранилище: {exc}"},
+            )
+
+        # 7. Upload .pdf to Storage (if conversion succeeded)
+        if pdf_path and os.path.exists(pdf_path):
+            with open(pdf_path, "rb") as f:
+                pdf_bytes = f.read()
+            try:
+                pdf_storage_path = f"{storage_prefix}/report.pdf"
+                db.storage.from_("outputs").upload(
+                    path=pdf_storage_path,
+                    file=pdf_bytes,
+                    file_options={"content-type": "application/pdf", "upsert": "true"},
+                )
+            except Exception as exc:
+                pdf_warning = (pdf_warning or "") + f" Ошибка загрузки PDF: {exc}"
+                pdf_storage_path = None
+
+    # 8. Create signed URLs (1 hour)
+    _SIGNED_URL_TTL = 3600
+    try:
+        docx_signed = db.storage.from_("outputs").create_signed_url(
+            docx_storage_path, _SIGNED_URL_TTL
+        )
+        docx_url: str = docx_signed.get("signedURL", "")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": f"Не удалось создать ссылку для скачивания docx: {exc}"},
+        )
+
+    pdf_url: Optional[str] = None
+    if pdf_storage_path:
+        try:
+            pdf_signed = db.storage.from_("outputs").create_signed_url(
+                pdf_storage_path, _SIGNED_URL_TTL
+            )
+            pdf_url = pdf_signed.get("signedURL")
+        except Exception:
+            pass  # signed URL failure is non-fatal for PDF
+
+    # 9. Persist output paths and mark project done
+    db.table("projects").update(
+        {
+            "output_docx_path": docx_storage_path,
+            "output_pdf_path": pdf_storage_path,
+            "status": "done",
+        }
+    ).eq("id", project_id).execute()
+
+    return GenerateResponse(
+        project_id=project_id,
+        docx_url=docx_url,
+        pdf_url=pdf_url,
+        warning=pdf_warning,
+    )
