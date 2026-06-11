@@ -615,6 +615,10 @@ async def compute(
 
 
 _SOFFICE_TIMEOUT = 90  # seconds
+# Resolves soffice executable: LIBREOFFICE_PATH env var → system PATH fallback.
+# Windows example: C:\Program Files\LibreOffice\program\soffice.exe
+# Linux/Docker:    soffice  (installed via apt, already on PATH)
+_SOFFICE_BIN = os.getenv("LIBREOFFICE_PATH", "soffice")
 
 
 @app.post("/generate", response_model=GenerateResponse, tags=["projects"])
@@ -697,7 +701,7 @@ async def generate(
         try:
             subprocess.run(
                 [
-                    "soffice",
+                    _SOFFICE_BIN,
                     "--headless",
                     "--convert-to", "pdf",
                     "--outdir", tmp_dir,
