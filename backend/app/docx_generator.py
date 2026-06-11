@@ -24,17 +24,15 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Cm, Pt, RGBColor
+from docx.shared import Cm, Pt
 
+
+from .gost_styles import apply_gost_page_setup, apply_gost_paragraph_styles, apply_table_cell_style
 from .schemas import CalculationSpec
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-_FONT = 'Times New Roman'
-_BODY_PT = Pt(14)
-_TABLE_PT = Pt(12)
 
 # Identifiers skipped during formula value substitution
 _FORMULA_SKIP: frozenset[str] = frozenset({
@@ -82,76 +80,6 @@ def _substitute_values(formula: str, namespace: dict, rounding: int = 3) -> str:
     )
 
 
-# ---------------------------------------------------------------------------
-# XML / style helpers
-# ---------------------------------------------------------------------------
-
-def _set_font_all_scripts(style, font_name: str) -> None:
-    """
-    Set w:ascii, w:hAnsi, w:eastAsia and w:cs on a style's rPr → rFonts.
-    python-docx's font.name only sets ascii+hAnsi; eastAsia/cs are needed
-    for correct Cyrillic rendering in all viewers.
-    """
-    style.font.name = font_name
-
-    rPr = style.element.find(qn('w:rPr'))
-    if rPr is None:
-        rPr = OxmlElement('w:rPr')
-        style.element.append(rPr)
-
-    rFonts = rPr.find(qn('w:rFonts'))
-    if rFonts is None:
-        rFonts = OxmlElement('w:rFonts')
-        rPr.insert(0, rFonts)
-
-    for attr in ('w:ascii', 'w:hAnsi', 'w:eastAsia', 'w:cs'):
-        rFonts.set(qn(attr), font_name)
-
-
-def _setup_heading_style(style) -> None:
-    _set_font_all_scripts(style, _FONT)
-    style.font.size = _BODY_PT
-    style.font.bold = True
-    style.font.italic = False
-    style.font.color.rgb = RGBColor(0, 0, 0)
-
-    pf = style.paragraph_format
-    pf.left_indent = Cm(1.25)
-    pf.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-    pf.line_spacing = 1.5        # float → MULTIPLE rule
-    pf.space_before = Pt(14)
-    pf.space_after = Pt(14)
-    pf.page_break_before = False  # page breaks managed explicitly
-
-
-def _setup_normal_style(doc: Document) -> None:
-    style = doc.styles['Normal']
-    _set_font_all_scripts(style, _FONT)
-    style.font.size = _BODY_PT
-
-    pf = style.paragraph_format
-    pf.first_line_indent = Cm(1.25)
-    pf.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-    pf.line_spacing = 1.5
-    pf.space_before = Pt(0)
-    pf.space_after = Pt(0)
-
-
-def _setup_styles(doc: Document) -> None:
-    _setup_normal_style(doc)
-    _setup_heading_style(doc.styles['Heading 1'])
-    _setup_heading_style(doc.styles['Heading 2'])
-
-
-def _set_page_margins(doc: Document) -> None:
-    """ГОСТ: left 30 mm, right 10 mm, top/bottom 20 mm."""
-    for section in doc.sections:
-        section.left_margin = Cm(3)
-        section.right_margin = Cm(1)
-        section.top_margin = Cm(2)
-        section.bottom_margin = Cm(2)
-
-
 def _remove_table_borders(table) -> None:
     """Remove all visible borders from a table via OOXML."""
     tbl = table._tbl
@@ -166,22 +94,6 @@ def _remove_table_borders(table) -> None:
         border.set(qn('w:val'), 'none')
         tblBorders.append(border)
     tblPr.append(tblBorders)
-
-
-def _apply_table_cell_style(cell) -> None:
-    """
-    ГОСТ table-cell style:
-    - centred, no first-line indent, 8 pt spacing before/after.
-    """
-    for p in cell.paragraphs:
-        pf = p.paragraph_format
-        pf.first_line_indent = Cm(0)
-        pf.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        pf.space_before = Pt(8)
-        pf.space_after = Pt(8)
-        for run in p.runs:
-            run.font.name = _FONT
-            run.font.size = _TABLE_PT
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +199,7 @@ def _add_input_data_table(doc: Document, spec: CalculationSpec) -> None:
     headers = ['Обозначение', 'Наименование', 'Значение', 'Ед. изм.']
     for cell, text in zip(hdr, headers):
         cell.text = text
-        _apply_table_cell_style(cell)
+        apply_table_cell_style(cell)
         cell.paragraphs[0].runs[0].bold = True
 
     # Data rows
@@ -302,7 +214,7 @@ def _add_input_data_table(doc: Document, spec: CalculationSpec) -> None:
         )
         row[3].text = item.unit
         for cell in row:
-            _apply_table_cell_style(cell)
+            apply_table_cell_style(cell)
 
     doc.add_page_break()
 
@@ -446,8 +358,8 @@ def generate_docx(spec: CalculationSpec, meta: dict, output_path: str) -> str:
         output_path (passthrough for convenience).
     """
     doc = Document()
-    _set_page_margins(doc)
-    _setup_styles(doc)
+    apply_gost_page_setup(doc)
+    apply_gost_paragraph_styles(doc)
 
     _add_title_page(doc, spec, meta)
     _add_toc(doc)

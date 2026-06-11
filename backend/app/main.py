@@ -4,6 +4,7 @@ All business logic lives in dedicated modules (pdf_extract, calc_engine, etc.).
 """
 from __future__ import annotations
 
+import io
 import os
 import subprocess
 import tempfile
@@ -12,7 +13,9 @@ from typing import Annotated, Dict, List, Optional
 
 import fitz
 from dotenv import load_dotenv
+from docx import Document
 from fastapi import Body, Depends, FastAPI, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt as jose_jwt
@@ -21,6 +24,7 @@ from pydantic import BaseModel, Field, ValidationError
 from .ai_provider import AI_PROVIDER, extract_calculation_spec, generate_conclusion
 from .calc_engine import CalcError, run_calculation
 from .docx_generator import generate_docx
+from .gost_styles import apply_gost_styles, remove_toc_section
 from .pdf_extract import extract_text_and_tables
 from .schemas import CalculationSpec
 from .supabase_client import get_supabase
@@ -801,4 +805,79 @@ async def generate(
         docx_url=docx_url,
         pdf_url=pdf_url,
         warning=pdf_warning,
+    )
+
+
+_DOCX_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
+_DOCX_EXTENSIONS = {".docx"}
+
+
+@app.post("/format-gost", tags=["tools"])
+async def format_gost(
+    file: Annotated[UploadFile, File(description=".docx файл для приведения к ГОСТ")],
+    include_toc: Annotated[
+        bool,
+        Query(description="Сохранить раздел 'Содержание' (true) или удалить (false)"),
+    ] = True,
+    user: CurrentUser = None,
+) -> Response:
+    """
+    Применяет ГОСТ-стили (поля, шрифты, межстрочный интервал, стили ячеек таблиц)
+    к загруженному .docx файлу.
+
+    Если include_toc=false — удаляет заголовок 'Содержание' и поле TOC из документа.
+    Если include_toc=true и поля TOC нет — стили применяются без его добавления.
+
+    Возвращает обработанный .docx файл для скачивания.
+    Не требует project_id — работает как standalone утилита для любого документа.
+    """
+    filename = file.filename or "document.docx"
+    ext = os.path.splitext(filename)[1].lower()
+
+    is_docx = (
+        ext in _DOCX_EXTENSIONS
+        or file.content_type == _DOCX_CONTENT_TYPE
+    )
+    if not is_docx:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Поддерживаются только файлы .docx"},
+        )
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Загруженный файл пустой"},
+        )
+
+    try:
+        doc = Document(io.BytesIO(file_bytes))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": f"Не удалось открыть файл как .docx: {exc}"},
+        )
+
+    try:
+        apply_gost_styles(doc)
+        if not include_toc:
+            remove_toc_section(doc)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": f"Ошибка применения стилей: {exc}"},
+        )
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+
+    safe_name = os.path.splitext(filename)[0] + "_gost.docx"
+    return Response(
+        content=buf.read(),
+        media_type=_DOCX_CONTENT_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
     )
