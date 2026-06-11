@@ -1,0 +1,161 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CalculationSpec",
+  "description": "Структурированное представление инженерного/учебного расчёта, извлечённое из текста задания. Используется как вход для Python-движка (calc_engine.py) и для генерации отчёта по ГОСТ.",
+  "type": "object",
+  "required": ["title", "input_data", "sections"],
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "Название работы, например 'Расчёт очистных сооружений станции очистки сточных вод'."
+    },
+    "discipline": {
+      "type": "string",
+      "description": "Дисциплина/предмет, если упоминается в задании (для титульного листа)."
+    },
+    "work_type": {
+      "type": "string",
+      "enum": ["курсовая работа", "курсовой проект", "контрольная работа", "расчётно-графическая работа", "лабораторная работа", "другое"],
+      "description": "Тип работы, если определим из текста."
+    },
+
+    "input_data": {
+      "type": "array",
+      "description": "Все исходные данные по варианту: и из таблицы 'Исходные данные', и упомянутые в тексте константы/коэффициенты.",
+      "items": {
+        "type": "object",
+        "required": ["id", "symbol", "value", "description"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Уникальный идентификатор переменной для использования в формулах. Латиница/кириллица, без пробелов, например 'Q_sut' или 'Q_сут'."
+          },
+          "symbol": {
+            "type": "string",
+            "description": "Отображаемое обозначение для документа, например 'Qсут'."
+          },
+          "value": {
+            "type": ["number", "string"],
+            "description": "Числовое значение. Если значение само является формулой по варианту (редко) — строка-выражение."
+          },
+          "unit": {
+            "type": "string",
+            "description": "Единица измерения, например 'м3/сут'. Пустая строка, если безразмерная величина."
+          },
+          "description": {
+            "type": "string",
+            "description": "Название величины на русском, как в задании."
+          }
+        }
+      }
+    },
+
+    "tables": {
+      "type": "array",
+      "description": "Справочные таблицы из методички, используемые для интерполяции (например, таблицы коэффициентов).",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "x", "y"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Идентификатор таблицы для использования в interp(table_id, x) внутри формул."
+          },
+          "name": {
+            "type": "string",
+            "description": "Название таблицы, как в задании."
+          },
+          "x_label": {"type": "string"},
+          "y_label": {"type": "string"},
+          "x": {
+            "type": "array",
+            "items": {"type": "number"},
+            "description": "Опорные значения аргумента (по возрастанию)."
+          },
+          "y": {
+            "type": "array",
+            "items": {"type": "number"},
+            "description": "Соответствующие значения функции."
+          },
+          "interpolation": {
+            "type": "string",
+            "enum": ["linear"],
+            "default": "linear"
+          }
+        }
+      }
+    },
+
+    "sections": {
+      "type": "array",
+      "description": "Разделы расчёта в порядке документа (соответствуют разделам методички/содержания).",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "steps"],
+        "properties": {
+          "id": {"type": "string"},
+          "title": {
+            "type": "string",
+            "description": "Заголовок раздела, например '1. Определение расходов сточных вод'."
+          },
+          "intro_text": {
+            "type": "string",
+            "description": "Краткий вводный текст раздела (если есть в задании), 1-3 предложения."
+          },
+          "steps": {
+            "type": "array",
+            "items": {"$ref": "#/definitions/step"}
+          }
+        }
+      }
+    },
+
+    "conclusion_instructions": {
+      "type": "string",
+      "description": "Инструкция для генерации текста заключения на основе посчитанных результатов (что упомянуть, какие выводы сделать)."
+    }
+  },
+
+  "definitions": {
+    "step": {
+      "type": "object",
+      "required": ["id", "result_symbol", "description", "formula", "unit"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Уникальный идентификатор результата шага (используется как переменная в последующих формулах)."
+        },
+        "result_symbol": {
+          "type": "string",
+          "description": "Отображаемое обозначение результата, например 'Qср.час'."
+        },
+        "description": {
+          "type": "string",
+          "description": "Название/описание величины для текста документа."
+        },
+        "formula": {
+          "type": "string",
+          "description": "Python-выражение для asteval. Использует id входных данных и id результатов предыдущих шагов. Для табличных коэффициентов — interp('table_id', x_value). Числовые литералы допустимы только для математических констант (2, 0.5, 24, 86400 и т.п.), но не для значений по варианту."
+        },
+        "unit": {
+          "type": "string",
+          "description": "Единица измерения результата."
+        },
+        "rounding": {
+          "type": "integer",
+          "default": 3,
+          "description": "Число знаков после запятой при отображении в документе."
+        },
+        "explanation": {
+          "type": "string",
+          "description": "Пояснение к формуле для текста документа (что означают переменные, ссылки на нормативы и т.п.), если есть в задании."
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Список id переменных/шагов, от которых зависит формула (можно вывести автоматически парсингом, но AI указывает явно для надёжности)."
+        }
+      }
+    }
+  }
+}
