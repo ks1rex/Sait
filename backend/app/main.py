@@ -4,6 +4,7 @@ All business logic lives in dedicated modules (pdf_extract, calc_engine, etc.).
 """
 from __future__ import annotations
 
+import copy
 import io
 import json
 import os
@@ -23,8 +24,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt as jose_jwt
 from pydantic import BaseModel, Field, ValidationError
 
-from .ai_provider import AI_PROVIDER, extract_calculation_spec, generate_conclusion
-from .calc_engine import CalcError, run_calculation
+from .ai_provider import AI_PROVIDER, extract_calculation_spec, extract_variant_inputs, generate_conclusion
+from .calc_engine import CalcError, render_text_template, run_calculation
 from .docx_generator import generate_docx
 from .gost_styles import apply_gost_styles, remove_toc_section
 from .pdf_extract import extract_text_and_tables
@@ -226,6 +227,34 @@ def _download_and_extract(storage_path: str) -> str:
     return _bytes_to_text(file_bytes, storage_path, content_type)
 
 
+def _validate_template_id(template_id: str) -> None:
+    """Check that template_id exists in manifest.json and its spec file is on disk."""
+    if not _MANIFEST_PATH.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "Список шаблонов (manifest.json) не найден на сервере"},
+        )
+    try:
+        manifest = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": f"Не удалось прочитать список шаблонов: {exc}"},
+        )
+    entry = next((item for item in manifest if item.get("id") == template_id), None)
+    if entry is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": f"Шаблон с id='{template_id}' не найден в manifest.json"},
+        )
+    spec_file = entry.get("spec_file", "")
+    if not (_TEMPLATES_DIR / "specs" / spec_file).exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": f"Файл спецификации для шаблона '{template_id}' не найден на сервере"},
+        )
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -301,6 +330,30 @@ async def upload_pdf(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Для режима fixed_template необходимо указать template_id"},
         )
+
+    if generation_mode == "fixed_template":
+        _validate_template_id(template_id)  # type: ignore[arg-type]
+        if methodology and methodology.filename:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": (
+                        "В режиме fixed_template принимается только один файл (task). "
+                        "Поле 'methodology' должно быть пустым."
+                    )
+                },
+            )
+        if variant_data and variant_data.filename:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": (
+                        "В режиме fixed_template принимается только один файл (task). "
+                        "Поле 'variant_data' должно быть пустым."
+                    )
+                },
+            )
+
     if task.content_type not in _PDF_CONTENT_TYPES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -452,16 +505,127 @@ async def extract_spec(
     project = _require_project(project_id, user_id)
     generation_mode: str = project.get("generation_mode", "universal")
 
-    # ── Режимы, реализованные позже ─────────────────────────────────────────
-    if generation_mode in ("fixed_template", "custom_template"):
+    # ── fixed_template ───────────────────────────────────────────────────────
+    if generation_mode == "fixed_template":
+        template_id: str | None = project.get("template_id")
+        if not template_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "Проект не имеет template_id для режима fixed_template"},
+            )
+
+        spec_path = _TEMPLATES_DIR / "specs" / f"{template_id}.json"
+        if not spec_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": f"Файл спецификации для шаблона '{template_id}' не найден"},
+            )
+        spec_dict = copy.deepcopy(json.loads(spec_path.read_text(encoding="utf-8")))
+
+        files_result = (
+            db.table("project_files")
+            .select("file_type, storage_path")
+            .eq("project_id", project_id)
+            .execute()
+        )
+        if not files_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "К проекту не привязано ни одного файла"},
+            )
+        files_by_type: dict[str, str] = {
+            row["file_type"]: row["storage_path"] for row in files_result.data
+        }
+        if "task" not in files_by_type:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "Файл варианта (task) не найден в проекте"},
+            )
+
+        variant_text = _download_and_extract(files_by_type["task"])
+        if not variant_text.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "Не удалось извлечь текст из PDF варианта"},
+            )
+
+        input_schema = [
+            {
+                "id": item["id"],
+                "symbol": item.get("symbol", ""),
+                "description": item.get("description", ""),
+                "unit": item.get("unit", ""),
+            }
+            for item in spec_dict.get("input_data", [])
+        ]
+
+        try:
+            variant_result = extract_variant_inputs(input_schema, variant_text)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={"error": f"AI вернул некорректный JSON: {exc}"},
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={"error": f"Ошибка при обращении к AI: {exc}"},
+            )
+
+        for item in spec_dict["input_data"]:
+            if item["id"] in variant_result.overrides:
+                item["value"] = variant_result.overrides[item["id"]]
+
+        try:
+            spec = CalculationSpec.model_validate(spec_dict)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "error": "Шаблон не прошёл валидацию после применения варианта",
+                    "validation_errors": exc.errors(),
+                },
+            )
+
+        try:
+            db.table("calculation_specs").upsert(
+                {"project_id": project_id, "spec_json": spec.model_dump()},
+                on_conflict="project_id",
+            ).execute()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": f"Ошибка сохранения спецификации: {exc}"},
+            )
+
+        db.table("projects").update({"status": "extracted"}).eq("id", project_id).execute()
+
+        try:
+            db.table("ai_usage").insert(
+                {
+                    "user_id": user_id,
+                    "project_id": project_id,
+                    "provider": AI_PROVIDER,
+                    "model": variant_result.model,
+                    "input_tokens": variant_result.input_tokens,
+                    "output_tokens": variant_result.output_tokens,
+                }
+            ).execute()
+        except Exception:
+            pass
+
+        return ExtractResponse(project_id=project_id, spec=spec)
+
+    # ── custom_template: not yet implemented ─────────────────────────────────
+    if generation_mode == "custom_template":
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
             detail={
                 "status": "not_implemented_yet",
                 "generation_mode": generation_mode,
                 "message": (
-                    f"Режим '{generation_mode}' будет реализован в следующих блоках. "
-                    "Используйте generation_mode='universal' для текущей функциональности."
+                    "Режим 'custom_template' будет реализован в следующих блоках. "
+                    "Используйте generation_mode='universal' или 'fixed_template'."
                 ),
             },
         )
@@ -681,11 +845,23 @@ async def compute(
             detail={"error": f"Ошибка расчёта: {exc}"},
         )
 
-    # 4. Generate conclusion via AI (non-fatal — report succeeds without it)
-    try:
-        spec.conclusion_text = generate_conclusion(spec.model_dump(), results)
-    except Exception:
-        spec.conclusion_text = None
+    # 4. Render Jinja2 templates (fixed_template) or generate via AI (universal)
+    if spec.intro_text_template:
+        try:
+            spec.intro_text = render_text_template(spec.intro_text_template, spec, results)
+        except Exception:
+            pass  # non-fatal; intro_text stays None
+
+    if spec.conclusion_text_template:
+        try:
+            spec.conclusion_text = render_text_template(spec.conclusion_text_template, spec, results)
+        except Exception:
+            spec.conclusion_text = None
+    else:
+        try:
+            spec.conclusion_text = generate_conclusion(spec.model_dump(), results)
+        except Exception:
+            spec.conclusion_text = None
 
     # 5. Persist updated spec (with computed values and conclusion)
     db.table("calculation_specs").update(

@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Dict
 
 from asteval import Interpreter
+from jinja2 import Template
 
 from .schemas import CalculationSpec
 
@@ -98,3 +99,31 @@ def run_calculation(spec: CalculationSpec) -> Dict[str, float]:
             results[step.id] = value
 
     return results
+
+
+def render_text_template(
+    template_str: str,
+    spec: CalculationSpec,
+    results: Dict[str, float],
+) -> str:
+    """
+    Render a Jinja2 template, replacing {{ id }} with formatted numeric values.
+
+    Step ids use their rounding setting; input_data ids default to 2 decimals.
+    Decimal separator is a comma (ГОСТ style).
+    """
+    rounding_by_id: Dict[str, int] = {
+        step.id: step.rounding
+        for section in spec.sections
+        for step in section.steps
+    }
+
+    def _fmt(val: float, decimals: int) -> str:
+        return f"{val:.{decimals}f}".replace(".", ",")
+
+    context = {
+        var_id: _fmt(value, rounding_by_id.get(var_id, 2))
+        for var_id, value in results.items()
+    }
+
+    return Template(template_str).render(**context)

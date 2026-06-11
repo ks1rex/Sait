@@ -80,6 +80,14 @@ class ExtractionResult(NamedTuple):
     output_tokens: int
 
 
+class VariantExtractionResult(NamedTuple):
+    overrides: dict  # {id: numeric value}
+    provider: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+
+
 # --- Публичные функции -------------------------------------------------------
 
 def extract_calculation_spec(
@@ -158,6 +166,99 @@ def extract_calculation_spec(
     usage = response.usage
     return ExtractionResult(
         spec_dict=spec_dict,
+        provider=AI_PROVIDER,
+        model=model,
+        input_tokens=usage.prompt_tokens if usage else 0,
+        output_tokens=usage.completion_tokens if usage else 0,
+    )
+
+
+_VARIANT_SYSTEM_PROMPT = (
+    "Ты — ассистент инженера. Тебе дан список расчётных параметров и текст "
+    "варианта студента (содержит таблицу «Исходные данные»). "
+    "Найди числовые значения параметров в тексте варианта. "
+    "Верни JSON-объект {id: значение}, где id — идентификатор из списка, "
+    "значение — число (int или float). "
+    "Включай ТОЛЬКО параметры, значение которых явно указано в тексте. "
+    "Если параметр не найден — не включай его. "
+    "Отвечай ТОЛЬКО JSON-объектом, без пояснений и markdown-разметки."
+)
+
+
+def extract_variant_inputs(
+    input_data_schema: list[dict],
+    variant_text: str,
+) -> VariantExtractionResult:
+    """
+    Lightweight AI call: extract input_data overrides from a student variant PDF.
+
+    Args:
+        input_data_schema: list of {id, symbol, description, unit} from the template
+        variant_text: extracted text from the variant PDF
+
+    Returns:
+        VariantExtractionResult with overrides {id: numeric value}
+
+    Raises:
+        ValueError: if model returns invalid JSON
+        openai.APIError: on network/API errors
+    """
+    cfg = PROVIDER_CONFIG[AI_PROVIDER]
+    model = cfg["extract_model"]
+
+    schema_lines = "\n".join(
+        f"  {item['id']}: {item.get('symbol', '')} — "
+        f"{item.get('description', '')} [{item.get('unit', '')}]"
+        for item in input_data_schema
+    )
+    user_content = (
+        f"Список параметров шаблона:\n{schema_lines}\n\n"
+        f"=== ТЕКСТ ВАРИАНТА ===\n{variant_text}\n=== КОНЕЦ ТЕКСТА ===\n\n"
+        "Верни JSON {id: значение} только для параметров, "
+        "явно указанных в тексте варианта."
+    )
+
+    client = _client()
+    response = client.chat.completions.create(
+        model=model,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": _VARIANT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+    )
+
+    content = response.choices[0].message.content or ""
+    if "```" in content:
+        for part in content.split("```"):
+            stripped = part.strip()
+            if stripped.startswith("json"):
+                stripped = stripped[4:].strip()
+            if stripped.startswith("{"):
+                content = stripped
+                break
+
+    try:
+        raw = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Модель вернула невалидный JSON при извлечении варианта: {exc}\n"
+            f"{content[:300]}"
+        )
+
+    overrides: dict = {}
+    for k, v in raw.items():
+        if isinstance(v, (int, float)):
+            overrides[k] = v
+        elif isinstance(v, str):
+            try:
+                overrides[k] = float(v.replace(",", "."))
+            except ValueError:
+                pass
+
+    usage = response.usage
+    return VariantExtractionResult(
+        overrides=overrides,
         provider=AI_PROVIDER,
         model=model,
         input_tokens=usage.prompt_tokens if usage else 0,
