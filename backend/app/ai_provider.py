@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import NamedTuple
 
 from openai import OpenAI
 
@@ -56,12 +57,6 @@ PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "docs"
 
 
 def _load_system_prompt() -> str:
-    """
-    Системный промпт хранится в docs/extraction_prompt.md между
-    маркерами ```` ```\n и \n```` (первый блок SYSTEM PROMPT).
-    Для простоты на этапе разработки можно временно держать промпт
-    прямо здесь константой — см. EXTRACTION_SYSTEM_PROMPT_FALLBACK.
-    """
     prompt_file = PROMPTS_DIR / "extraction_system_prompt.txt"
     if prompt_file.exists():
         return prompt_file.read_text(encoding="utf-8")
@@ -75,16 +70,60 @@ EXTRACTION_SYSTEM_PROMPT_FALLBACK = (
 )
 
 
+# --- Возвращаемый тип -------------------------------------------------------
+
+class ExtractionResult(NamedTuple):
+    spec_dict: dict
+    provider: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+
+
 # --- Публичные функции -------------------------------------------------------
 
-def extract_calculation_spec(task_text: str, use_fallback_model: bool = False) -> dict:
+def extract_calculation_spec(
+    task_text: str,
+    methodology_text: str | None = None,
+    extra_inputs_text: str | None = None,
+    use_fallback_model: bool = False,
+) -> ExtractionResult:
     """
-    Отправляет текст задания в LLM и возвращает распарсенный dict,
-    соответствующий CalculationSpec. Валидацию по Pydantic-схеме
-    делает вызывающий код (см. main.py /extract).
+    Отправляет текст(ы) источников в LLM и возвращает ExtractionResult.
+    Поле spec_dict — распарсенный dict, соответствующий CalculationSpec.
+    Валидацию по Pydantic-схеме делает вызывающий код (main.py /extract).
+
+    Args:
+        task_text: текст задания (обязательный).
+        methodology_text: текст методички (опционально).
+        extra_inputs_text: отдельные исходные данные по варианту (опционально).
+        use_fallback_model: переключиться на резервную модель.
+
+    Raises:
+        ValueError: если модель вернула невалидный JSON.
+        openai.APIError: при сетевых или API-ошибках.
     """
     cfg = PROVIDER_CONFIG[AI_PROVIDER]
     model = cfg["fallback_model"] if use_fallback_model else cfg["extract_model"]
+
+    # Build user message with clearly labelled source blocks
+    parts: list[str] = ["=== ЗАДАНИЕ ===", task_text, "=== КОНЕЦ ЗАДАНИЯ ==="]
+
+    if methodology_text and methodology_text.strip():
+        parts += ["", "=== МЕТОДИЧКА ===", methodology_text, "=== КОНЕЦ МЕТОДИЧКИ ==="]
+
+    if extra_inputs_text and extra_inputs_text.strip():
+        parts += [
+            "",
+            "=== ИСХОДНЫЕ ДАННЫЕ (ОТДЕЛЬНО) ===",
+            extra_inputs_text,
+            "=== КОНЕЦ ИСХОДНЫХ ДАННЫХ ===",
+        ]
+
+    user_content = (
+        "Преобразуй приведённые ниже материалы в CalculationSpec "
+        "по правилам из системного промпта.\n\n" + "\n".join(parts)
+    )
 
     client = _client()
     response = client.chat.completions.create(
@@ -92,22 +131,38 @@ def extract_calculation_spec(task_text: str, use_fallback_model: bool = False) -
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": _load_system_prompt()},
-            {
-                "role": "user",
-                "content": (
-                    "Вот полный текст задания (включая методику расчёта и "
-                    "таблицу исходных данных по варианту). Преобразуй его в "
-                    "CalculationSpec по описанным правилам.\n\n"
-                    "=== ТЕКСТ ЗАДАНИЯ ===\n"
-                    f"{task_text}\n"
-                    "=== КОНЕЦ ТЕКСТА ==="
-                ),
-            },
+            {"role": "user", "content": user_content},
         ],
     )
 
-    content = response.choices[0].message.content
-    return json.loads(content)
+    content = response.choices[0].message.content or ""
+
+    # Guard against markdown wrapping despite json_object response_format
+    if "```" in content:
+        for part in content.split("```"):
+            stripped = part.strip()
+            if stripped.startswith("json"):
+                stripped = stripped[4:].strip()
+            if stripped.startswith("{"):
+                content = stripped
+                break
+
+    try:
+        spec_dict = json.loads(content)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Модель вернула невалидный JSON: {e}\n"
+            f"Начало ответа: {content[:300]}"
+        )
+
+    usage = response.usage
+    return ExtractionResult(
+        spec_dict=spec_dict,
+        provider=AI_PROVIDER,
+        model=model,
+        input_tokens=usage.prompt_tokens if usage else 0,
+        output_tokens=usage.completion_tokens if usage else 0,
+    )
 
 
 def generate_conclusion(spec_dict: dict, computed_results: dict) -> str:
