@@ -5,16 +5,18 @@ All business logic lives in dedicated modules (pdf_extract, calc_engine, etc.).
 from __future__ import annotations
 
 import io
+import json
 import os
 import subprocess
 import tempfile
 import uuid
+from pathlib import Path
 from typing import Annotated, Dict, List, Optional
 
 import fitz
 from dotenv import load_dotenv
 from docx import Document
-from fastapi import Body, Depends, FastAPI, File, HTTPException, Query, UploadFile, status
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -53,6 +55,10 @@ _bearer = HTTPBearer()
 
 _PDF_CONTENT_TYPES = {"application/pdf", "application/octet-stream", "binary/octet-stream"}
 _TEXT_CONTENT_TYPES = {"text/plain", "text/csv"}
+
+_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
+_MANIFEST_PATH = _TEMPLATES_DIR / "manifest.json"
+_VALID_GENERATION_MODES = {"universal", "fixed_template", "custom_template"}
 
 
 async def get_current_user(
@@ -129,6 +135,15 @@ class GenerateResponse(BaseModel):
     docx_url: str
     pdf_url: Optional[str] = None
     warning: Optional[str] = None
+
+
+class TemplateInfo(BaseModel):
+    id: str
+    title: str
+    discipline: str = ""
+    work_type: str = ""
+    description: str = ""
+    spec_file: str
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +235,24 @@ async def health() -> HealthResponse:
     return HealthResponse(status="ok", version=app.version)
 
 
+@app.get("/templates", response_model=List[TemplateInfo], tags=["templates"])
+async def list_templates(user: CurrentUser) -> List[TemplateInfo]:
+    """
+    Возвращает список доступных фиксированных шаблонов расчёта из
+    templates/manifest.json. Используется в режиме fixed_template.
+    """
+    if not _MANIFEST_PATH.exists():
+        return []
+    try:
+        data = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
+        return [TemplateInfo(**item) for item in data]
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": f"Не удалось прочитать список шаблонов: {exc}"},
+        )
+
+
 @app.post("/upload", response_model=UploadResponse, tags=["projects"])
 async def upload_pdf(
     task: Annotated[UploadFile, File(description="PDF: задание (обязательно)")],
@@ -229,13 +262,40 @@ async def upload_pdf(
     variant_data: Annotated[
         Optional[UploadFile], File(description="PDF или TXT: исходные данные по варианту (опционально)")
     ] = None,
-    user: CurrentUser = None,  # injected by Depends via Annotated type above
+    generation_mode: Annotated[
+        str,
+        Form(description="Режим генерации: universal | fixed_template | custom_template"),
+    ] = "universal",
+    template_id: Annotated[
+        Optional[str],
+        Form(description="ID шаблона из GET /templates (только для fixed_template)"),
+    ] = None,
+    user: CurrentUser = None,
 ) -> UploadResponse:
     """
     Принимает до трёх файлов: задание (обязательно), методичка и
     исходные данные по варианту (оба опциональны).
     Сохраняет каждый в Storage, создаёт записи в project_files.
+
+    generation_mode=fixed_template + template_id указывает, что для этого
+    проекта будет использоваться готовый зашитый шаблон расчёта.
     """
+    if generation_mode not in _VALID_GENERATION_MODES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": (
+                    f"Недопустимый generation_mode '{generation_mode}'. "
+                    f"Допустимые значения: {sorted(_VALID_GENERATION_MODES)}"
+                )
+            },
+        )
+
+    if generation_mode == "fixed_template" and not template_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Для режима fixed_template необходимо указать template_id"},
+        )
     if task.content_type not in _PDF_CONTENT_TYPES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -322,15 +382,17 @@ async def upload_pdf(
 
     # Create project record
     title = os.path.splitext(task.filename or "Без названия")[0]
+    project_row: dict = {
+        "id": project_id,
+        "user_id": user_id,
+        "title": title,
+        "status": "uploaded",
+        "generation_mode": generation_mode,
+    }
+    if template_id:
+        project_row["template_id"] = template_id
     try:
-        db.table("projects").insert(
-            {
-                "id": project_id,
-                "user_id": user_id,
-                "title": title,
-                "status": "uploaded",
-            }
-        ).execute()
+        db.table("projects").insert(project_row).execute()
     except Exception as exc:
         try:
             db.storage.from_("uploads").remove(storage_paths)
@@ -374,17 +436,30 @@ async def extract_spec(
     user: CurrentUser,
 ) -> ExtractResponse:
     """
-    Скачивает все файлы проекта из Storage, извлекает текст,
-    формирует многосекционный промпт (ЗАДАНИЕ / МЕТОДИЧКА / ИСХОДНЫЕ ДАННЫЕ),
-    вызывает AI для построения CalculationSpec.
-    При ValidationError автоматически делает retry на fallback-модели.
-    Логирует потреблённые токены в ai_usage.
+    Строит CalculationSpec для проекта в зависимости от generation_mode:
+    - universal: AI извлекает структуру из загруженных PDF (текущая логика).
+    - fixed_template / custom_template: заглушка, будет реализована в Блоке 3-6.
     """
     db = get_supabase()
     user_id: str = user["user_id"]
 
-    # 1. Verify project ownership
-    _require_project(project_id, user_id)
+    # 1. Verify project ownership and load project row (contains generation_mode)
+    project = _require_project(project_id, user_id)
+    generation_mode: str = project.get("generation_mode", "universal")
+
+    # ── Режимы, реализованные позже ─────────────────────────────────────────
+    if generation_mode in ("fixed_template", "custom_template"):
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail={
+                "status": "not_implemented_yet",
+                "generation_mode": generation_mode,
+                "message": (
+                    f"Режим '{generation_mode}' будет реализован в следующих блоках. "
+                    "Используйте generation_mode='universal' для текущей функциональности."
+                ),
+            },
+        )
 
     # 2. Load file records for this project
     files_result = (

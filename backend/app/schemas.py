@@ -59,6 +59,11 @@ class CalculationSpec(BaseModel):
     # Текст введения (1-2 абзаца); None → placeholder в документе
     intro_text: Optional[str] = None
 
+    # Jinja2-шаблоны: {{ var_id }} заменяются на вычисленные значения
+    # Используются в режимах fixed_template / custom_template
+    intro_text_template: Optional[str] = None
+    conclusion_text_template: Optional[str] = None
+
     input_data: List[InputDatum]
     tables: List[TableDef] = Field(default_factory=list)
     sections: List[Section]
@@ -67,5 +72,5 @@ class CalculationSpec(BaseModel):
     # Библиографический список; пусто → placeholder в документе
     references: List[str] = Field(default_factory=list)
 
-    # Заполняется после генерации (docx_generator.py)
+    # Заполняется после расчёта (calc_engine + AI или шаблон)
     conclusion_text: Optional[str] = None
