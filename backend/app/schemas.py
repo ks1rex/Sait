@@ -47,16 +47,25 @@ class Section(BaseModel):
     title: str
     intro_text: str = ""
     steps: List[Step] = Field(default_factory=list)
+    # 1 = основной раздел (Heading 1), 2 = подраздел (Heading 2)
+    level: int = 1
 
 
 class CalculationSpec(BaseModel):
     title: str
     discipline: str = ""
     work_type: str = ""
+
+    # Текст введения (1-2 абзаца); None → placeholder в документе
+    intro_text: Optional[str] = None
+
     input_data: List[InputDatum]
     tables: List[TableDef] = Field(default_factory=list)
     sections: List[Section]
     conclusion_instructions: str = ""
+
+    # Библиографический список; пусто → placeholder в документе
+    references: List[str] = Field(default_factory=list)
 
     # Заполняется после генерации (docx_generator.py)
     conclusion_text: Optional[str] = None
