@@ -269,6 +269,89 @@ def extract_variant_inputs(
     )
 
 
+class MinimalEditResult(NamedTuple):
+    markdown: str
+    provider: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+
+
+_MINIMAL_EDIT_SYSTEM_PROMPT = (
+    "Ты — технический редактор инженерных расчётных работ. "
+    "Ты получаешь образец готовой работы в формате Markdown и новое задание (новый вариант). "
+    "Твоя единственная задача — переписать образец, сделав МИНИМАЛЬНО НЕОБХОДИМЫЕ изменения "
+    "для соответствия новому заданию. "
+    "Отвечай ТОЛЬКО Markdown-текстом переработанного документа, без пояснений, "
+    "без markdown-блоков с кодом (не оборачивай в ```markdown ... ```), "
+    "без вводных фраз вроде 'Вот переработанный документ:'."
+)
+
+
+def minimal_edit_rewrite(
+    template_markdown: str,
+    task_text: str,
+) -> MinimalEditResult:
+    """
+    Call DeepSeek to rewrite template_markdown with minimal edits
+    to match the new task/variant described in task_text.
+
+    Uses the fallback (more capable) model and a large token budget
+    because the full document rewrite is a long, complex output.
+    """
+    cfg = PROVIDER_CONFIG[AI_PROVIDER]
+    model = cfg["fallback_model"]
+
+    user_content = (
+        "Вот образец готовой работы в Markdown "
+        "(структура, формулировки, формулы, числа из СТАРОГО варианта):\n\n"
+        f"{template_markdown}\n\n"
+        "---\n\n"
+        "Вот новое задание (новый вариант/условие):\n\n"
+        f"{task_text}\n\n"
+        "---\n\n"
+        "Перепиши образец, внеся МИНИМАЛЬНО НЕОБХОДИМЫЕ изменения, чтобы "
+        "результат соответствовал новому заданию: обнови исходные данные, "
+        "пересчитай числовые результаты по тем же формулам с новыми "
+        "входными значениями, при необходимости скорректируй текстовые "
+        "формулировки (например, если изменилось количество секций/типов "
+        "оборудования — добавь/убери соответствующие пункты по аналогии "
+        "со стилем образца). ВСЁ остальное — структуру, заголовки, "
+        "формулировки, порядок разделов, стиль изложения — оставь БЕЗ "
+        "ИЗМЕНЕНИЙ. Заключение и введение перепиши с учётом новых данных, "
+        "сохранив структуру и стиль образца.\n\n"
+        "Верни результат тем же Markdown-форматом (# для Заголовок 1, "
+        "## для Заголовок 2, markdown-таблицы)."
+    )
+
+    client = _client()
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": _MINIMAL_EDIT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        max_tokens=32000,
+    )
+
+    content = response.choices[0].message.content or ""
+    # Strip accidental markdown code-block wrapper
+    if content.startswith("```"):
+        inner = content.split("```", 2)
+        if len(inner) >= 3:
+            content = inner[2] if inner[1].strip().lower() == "markdown" else inner[1]
+            content = content.strip()
+
+    usage = response.usage
+    return MinimalEditResult(
+        markdown=content,
+        provider=AI_PROVIDER,
+        model=model,
+        input_tokens=usage.prompt_tokens if usage else 0,
+        output_tokens=usage.completion_tokens if usage else 0,
+    )
+
+
 def generate_conclusion(spec_dict: dict, computed_results: dict) -> str:
     """
     Генерирует текст заключения на основе conclusion_instructions
