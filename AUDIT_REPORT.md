@@ -137,3 +137,20 @@ Severity: **critical** — эксплуатируемая уязвимость /
 
 Проверка: `python -c import` всех модулей OK; `tsc -b --noEmit` фронтенда — 0 ошибок;
 smoke-тест OK.
+
+---
+
+## Категория 9. Логирование и наблюдаемость
+
+| # | Severity | Файл | Проблема | Что сделано |
+|---|----------|------|----------|-------------|
+| 9.1 | medium | `main.py:/compute`, `ai_provider.generate_conclusion` | AI-вызов генерации заключения в `/compute` **не логировался** в `ai_usage`, и функция возвращала только строку (без usage) — слепое пятно в учёте AI-расхода. | `generate_conclusion` теперь возвращает `ConclusionResult` (text + provider/model/tokens); `/compute` пишет запись в `ai_usage`. |
+| 9.2 | low | `main.py` (5 мест) | Вставки в `ai_usage` оборачивались `except Exception: pass` — потеря usage-данных была молчаливой. | Заменено на `except Exception as exc: logger.warning(...)` во всех путях (fixed_template, minimal_edit, universal, chat, conclusion). |
+| 9.3 | ok | `auth.py`, `main.py` | Чувствительные данные в логи/ответы не утекают: `auth` возвращает `f"...{exc}"`, где `exc` — `JWTError` (без самого токена); секреты/ключи в сообщениях ошибок отсутствуют. | Без изменений. |
+| 9.4 | ok | `ai_provider` все вызовы | Логирование `ai_usage` присутствует на всех остальных AI-вызовах (extract universal/fixed, variant, minimal_edit, chat) с корректными provider/model/usage. | Без изменений (плюс фикс 9.1 закрыл единственный пропуск). |
+
+Проверка: рестарт uvicorn; **полный AI-acceptance-тест** (`acceptance_test.py`:
+extract→compute→generate на реальном DeepSeek) — все 17 эталонных значений
+совпали, docx (52 КБ) и PDF (372 КБ) сгенерированы; smoke-тест OK. Биллинг
+подтверждён попутно: новый пользователь с балансом 0 получил корректный 402 на
+`/extract`.

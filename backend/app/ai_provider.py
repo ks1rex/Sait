@@ -393,18 +393,28 @@ def chat_completion(messages: list[dict]) -> ChatCompletionResult:
     )
 
 
-def generate_conclusion(spec_dict: dict, computed_results: dict) -> str:
+class ConclusionResult(NamedTuple):
+    text: str
+    provider: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+
+
+def generate_conclusion(spec_dict: dict, computed_results: dict) -> ConclusionResult:
     """
     Генерирует текст заключения на основе conclusion_instructions
     и посчитанных результатов. computed_results — плоский словарь
-    {step_id: значение}.
+    {step_id: значение}. Возвращает текст вместе с usage для логирования
+    в ai_usage.
     """
     cfg = PROVIDER_CONFIG[AI_PROVIDER]
     client = _client()
+    model = cfg["extract_model"]
 
     instructions = spec_dict.get("conclusion_instructions", "")
     response = client.chat.completions.create(
-        model=cfg["extract_model"],
+        model=model,
         messages=[
             {
                 "role": "system",
@@ -426,4 +436,11 @@ def generate_conclusion(spec_dict: dict, computed_results: dict) -> str:
             },
         ],
     )
-    return response.choices[0].message.content
+    usage = response.usage
+    return ConclusionResult(
+        text=response.choices[0].message.content or "",
+        provider=AI_PROVIDER,
+        model=model,
+        input_tokens=usage.prompt_tokens if usage else 0,
+        output_tokens=usage.completion_tokens if usage else 0,
+    )

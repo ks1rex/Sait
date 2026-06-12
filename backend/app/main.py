@@ -923,8 +923,8 @@ async def extract_spec(
                     "output_tokens": variant_result.output_tokens,
                 }
             ).execute()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("ai_usage insert failed (fixed_template) for project %s: %s", project_id, exc)
 
         return ExtractResponse(project_id=project_id, spec=spec)
 
@@ -1123,8 +1123,8 @@ async def extract_spec(
                     "input_tokens": me_result.input_tokens,
                     "output_tokens": me_result.output_tokens,
                 }).execute()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("ai_usage insert failed (minimal_edit) for project %s: %s", project_id, exc)
 
             return JSONResponse(content={
                 "project_id": project_id,
@@ -1272,8 +1272,8 @@ async def extract_spec(
                 "output_tokens": total_output_tokens,
             }
         ).execute()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("ai_usage insert failed (universal) for project %s: %s", project_id, exc)
 
     return ExtractResponse(project_id=project_id, spec=spec)
 
@@ -1651,8 +1651,8 @@ async def chat_turn(
             "input_tokens": ai_result.input_tokens,
             "output_tokens": ai_result.output_tokens,
         }).execute()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("ai_usage insert failed (chat) for project %s: %s", project_id, exc)
 
     return ChatResponse(reply=reply_comment, docx_url=docx_url, pdf_url=pdf_url)
 
@@ -1738,8 +1738,21 @@ async def compute(
             spec.conclusion_text = None
     else:
         try:
-            spec.conclusion_text = generate_conclusion(spec.model_dump(), results)
-        except Exception:
+            _concl = generate_conclusion(spec.model_dump(), results)
+            spec.conclusion_text = _concl.text
+            try:
+                db.table("ai_usage").insert({
+                    "user_id": user_id,
+                    "project_id": project_id,
+                    "provider": _concl.provider,
+                    "model": _concl.model,
+                    "input_tokens": _concl.input_tokens,
+                    "output_tokens": _concl.output_tokens,
+                }).execute()
+            except Exception as exc:
+                logger.warning("ai_usage insert failed (conclusion): %s", exc)
+        except Exception as exc:
+            logger.warning("conclusion generation failed for project %s: %s", project_id, exc)
             spec.conclusion_text = None
 
     # 5. Persist updated spec (with computed values and conclusion)
