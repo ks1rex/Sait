@@ -1,20 +1,23 @@
 FROM python:3.11-slim
 
-WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libreoffice \
+    fonts-liberation \
+    fonts-noto \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# LibreOffice is required for docx → pdf conversion (stage 7 of the roadmap).
-# Uncomment when ready to enable /generate PDF output.
-# Adds ~300 MB to the image, so kept opt-in for now.
-#
-# RUN apt-get update && apt-get install -y --no-install-recommends \
-#         libreoffice \
-#     && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
+COPY templates/ ./templates/
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV LIBREOFFICE_PATH=soffice
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

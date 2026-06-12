@@ -77,6 +77,19 @@ _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 _MANIFEST_PATH = _TEMPLATES_DIR / "manifest.json"
 _VALID_GENERATION_MODES = {"universal", "fixed_template", "custom_template"}
 
+_MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB
+
+
+async def _read_limited(upload: UploadFile, label: str) -> bytes:
+    data = await upload.read(_MAX_FILE_BYTES + 1)
+    if len(data) > _MAX_FILE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={"error": f"{label}: файл превышает 20 МБ"},
+        )
+    return data
+
+
 
 # ---------------------------------------------------------------------------
 # Request / Response models
@@ -463,7 +476,7 @@ async def upload_pdf(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail={"error": "Шаблон должен быть файлом .docx или .pdf"},
                 )
-            tpl_bytes = await template.read()
+            tpl_bytes = await _read_limited(template, "Шаблон")
             if not tpl_bytes:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -502,7 +515,7 @@ async def upload_pdf(
         ct_task_bytes: bytes | None = None
         ct_task_filename: str | None = None
         if task and task.filename and effective_sub_mode in ("minimal_edit", "chat"):
-            ct_task_bytes = await task.read()
+            ct_task_bytes = await _read_limited(task, "Задание")
             if not ct_task_bytes:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -620,7 +633,7 @@ async def upload_pdf(
             detail={"error": "Поле 'task' должно содержать PDF-файл"},
         )
 
-    task_bytes = await task.read()
+    task_bytes = await _read_limited(task, "Задание")
     if not task_bytes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -644,7 +657,7 @@ async def upload_pdf(
     # Read optional files
     methodology_bytes: bytes | None = None
     if methodology and methodology.filename:
-        methodology_bytes = await methodology.read()
+        methodology_bytes = await _read_limited(methodology, "Методичка")
         if methodology_bytes:
             _validate_pdf_bytes(methodology_bytes, "Методичка")
         else:
@@ -652,7 +665,7 @@ async def upload_pdf(
 
     variant_data_bytes: bytes | None = None
     if variant_data and variant_data.filename:
-        variant_data_bytes = await variant_data.read()
+        variant_data_bytes = await _read_limited(variant_data, "Исходные данные")
         if not variant_data_bytes:
             variant_data_bytes = None
 
@@ -1347,6 +1360,9 @@ _CHAT_SYSTEM_PROMPT = (
     "результат по ГОСТ (Times New Roman 14pt, поля 30/10/20/20мм, "
     "межстрочный интервал 1.5, выравнивание по ширине, заголовки с "
     "отступом 1.25см) — ЕСЛИ пользователь явно не попросил иначе.\n"
+    "Формулы нумеруй сквозно в скобках по порядку появления: "
+    "`Q = V / t  (1)`. "
+    "Нумерацию формул сохраняй и обновляй при каждом редактировании.\n"
     "Все остальные требования по содержанию, структуре, формулировкам — "
     "бери из сообщений пользователя.\n"
     "Отвечай строго в следующем формате:\n"
