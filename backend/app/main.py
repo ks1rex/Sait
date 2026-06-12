@@ -1182,6 +1182,43 @@ async def extract_spec(
     return ExtractResponse(project_id=project_id, spec=spec)
 
 
+class ProjectMeta(BaseModel):
+    id: str
+    title: str
+    status: str
+    generation_mode: str
+    created_at: str
+    output_docx_url: Optional[str] = None
+    output_pdf_url: Optional[str] = None
+
+
+@app.get("/project/{project_id}", response_model=ProjectMeta, tags=["projects"])
+async def get_project(project_id: str, user: CurrentUser) -> ProjectMeta:
+    """Возвращает метаданные проекта и свежие подписанные URL для скачивания файлов."""
+    project = _require_project(project_id, user["user_id"])
+    db = get_supabase()
+    _TTL = 3600
+
+    def _signed(path: Optional[str]) -> Optional[str]:
+        if not path:
+            return None
+        try:
+            r = db.storage.from_("outputs").create_signed_url(path, _TTL)
+            return r.get("signedURL")
+        except Exception:
+            return None
+
+    return ProjectMeta(
+        id=project["id"],
+        title=project.get("title", ""),
+        status=project.get("status", "pending"),
+        generation_mode=project.get("generation_mode", "universal"),
+        created_at=project.get("created_at", ""),
+        output_docx_url=_signed(project.get("output_docx_path")),
+        output_pdf_url=_signed(project.get("output_pdf_path")),
+    )
+
+
 @app.get("/spec/{project_id}", tags=["projects"])
 async def get_spec(project_id: str, user: CurrentUser):
     """
