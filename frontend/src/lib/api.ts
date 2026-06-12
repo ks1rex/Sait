@@ -9,7 +9,7 @@ async function authHeaders(): Promise<Record<string, string>> {
 
 // Typed API error — callers can check .status to distinguish 402 from other errors
 export class ApiError extends Error {
-  readonly status: number
+  status: number
   constructor(message: string, status: number) {
     super(message)
     this.name = 'ApiError'
