@@ -1,10 +1,16 @@
+import { useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { LogOut, BookOpen, PlusCircle, FileText } from 'lucide-react'
+import { LogOut, BookOpen, PlusCircle, FileText, Coins } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
+import { useTokens } from '../contexts/TokenContext'
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth()
+  const { balance, unlimited, refreshBalance, openRedeem } = useTokens()
   const navigate = useNavigate()
+
+  // Refresh balance every time a protected page mounts
+  useEffect(() => { refreshBalance() }, [refreshBalance])
 
   const handleLogout = async () => {
     await logout()
@@ -31,7 +37,25 @@ export function Layout({ children }: { children: React.ReactNode }) {
         </nav>
 
         <div className="flex items-center gap-3 text-sm text-slate-400">
-          <span className="hidden sm:block truncate max-w-[180px]">{user?.email}</span>
+          {/* Token balance badge */}
+          <button
+            onClick={openRedeem}
+            title="Нажмите чтобы активировать код"
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium
+              transition-colors hover:border-accent/70 hover:text-accent
+              ${unlimited
+                ? 'border-accent/50 text-accent bg-accent/10'
+                : balance === null
+                ? 'border-slate-700 text-slate-500'
+                : balance === 0
+                ? 'border-red-800 text-red-400 bg-red-950/30'
+                : 'border-slate-600 text-slate-300'}`}
+          >
+            <Coins size={13} />
+            {unlimited ? '∞' : balance === null ? '…' : balance}
+          </button>
+
+          <span className="hidden sm:block truncate max-w-[160px]">{user?.email}</span>
           <button onClick={handleLogout} className="flex items-center gap-1.5 hover:text-red-400 transition-colors">
             <LogOut size={15} />
             Выйти

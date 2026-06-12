@@ -1,8 +1,11 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider } from './contexts/AuthContext'
+import { TokenProvider } from './contexts/TokenContext'
 import { ToastProvider } from './components/Toast'
 import { ProtectedRoute } from './components/ProtectedRoute'
 import { Layout } from './components/Layout'
+import { RedeemModal } from './components/RedeemModal'
+import { InsufficientTokensModal } from './components/InsufficientTokensModal'
 import { LoginPage } from './pages/LoginPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { NewProjectPage } from './pages/NewProjectPage'
@@ -74,9 +77,14 @@ export default function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
-        <ToastProvider>
-          <AppRoutes />
-        </ToastProvider>
+        <TokenProvider>
+          <ToastProvider>
+            <AppRoutes />
+            {/* Global modals — rendered outside route tree so they survive navigation */}
+            <RedeemModal />
+            <InsufficientTokensModal />
+          </ToastProvider>
+        </TokenProvider>
       </AuthProvider>
     </BrowserRouter>
   )

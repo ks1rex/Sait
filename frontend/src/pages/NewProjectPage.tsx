@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { BookOpen, Layers, FileEdit, Wand2, MessageSquare, ChevronRight } from 'lucide-react'
 import { FileDropZone } from '../components/FileDropZone'
 import { useToast } from '../components/Toast'
-import { apiGet, apiPostForm } from '../lib/api'
+import { apiGet, apiPostForm, ApiError } from '../lib/api'
 import type { TemplateInfo } from '../types'
 
 type GenerationMode = 'universal' | 'fixed_template' | 'custom_template'
@@ -13,45 +13,70 @@ interface UploadResponse { project_id: string }
 
 // ── Mode cards ───────────────────────────────────────────────────────────────
 
-const MODES: { id: GenerationMode; icon: React.ReactNode; title: string; desc: string }[] = [
+// ── Token cost helpers ───────────────────────────────────────────────────────
+
+function pluralTokens(n: number): string {
+  if (n === 1) return '1 токен'
+  if (n >= 2 && n <= 4) return `${n} токена`
+  return `${n} токенов`
+}
+
+function CostBadge({ label }: { label: string }) {
+  return (
+    <span className="ml-auto shrink-0 text-xs text-yellow-400/80 bg-yellow-950/40 border border-yellow-900/50
+      rounded-full px-2 py-0.5 font-medium whitespace-nowrap">
+      {label}
+    </span>
+  )
+}
+
+// ── Mode / sub-mode definitions ──────────────────────────────────────────────
+
+const MODES: { id: GenerationMode; icon: React.ReactNode; title: string; desc: string; cost: string | null }[] = [
   {
     id: 'universal',
     icon: <BookOpen size={22} />,
     title: 'Стандартная курсовая',
     desc: 'AI распознаёт задание и формулы автоматически',
+    cost: pluralTokens(3),
   },
   {
     id: 'fixed_template',
     icon: <Layers size={22} />,
     title: 'По шаблону',
     desc: 'Готовая методика расчёта, вы вводите только свой вариант',
+    cost: pluralTokens(2),
   },
   {
     id: 'custom_template',
     icon: <FileEdit size={22} />,
     title: 'Свой шаблон',
     desc: 'Загружаете собственный образец работы',
+    cost: null, // shown per sub-mode
   },
 ]
 
-const SUB_MODES: { id: SubMode; icon: React.ReactNode; title: string; desc: string }[] = [
+const SUB_MODES: { id: SubMode; icon: React.ReactNode; title: string; desc: string; cost: string }[] = [
   {
     id: 'format_only',
     icon: <Wand2 size={16} />,
     title: 'Привести к ГОСТ',
     desc: 'Форматирует без изменения содержания, убирает оглавление',
+    cost: pluralTokens(1),
   },
   {
     id: 'minimal_edit',
     icon: <FileEdit size={16} />,
     title: 'Адаптировать под новое условие',
     desc: 'AI переписывает расчёты по новому заданию, сохраняя структуру',
+    cost: pluralTokens(5),
   },
   {
     id: 'chat',
     icon: <MessageSquare size={16} />,
     title: 'Через чат',
     desc: 'Интерактивное редактирование — давайте команды ассистенту',
+    cost: '1 токен / сообщение',
   },
 ]
 
@@ -142,7 +167,10 @@ export function NewProjectPage() {
         navigate(`/project/${project_id}/review`)
       }
     } catch (err: unknown) {
-      toast(err instanceof Error ? err.message : 'Ошибка', 'error')
+      // 402 is handled globally by InsufficientTokensModal — skip toast
+      if (!(err instanceof ApiError && err.status === 402)) {
+        toast(err instanceof Error ? err.message : 'Ошибка', 'error')
+      }
       setStep('idle')
     }
   }
@@ -173,11 +201,12 @@ export function NewProjectPage() {
                 <span className={`mt-0.5 shrink-0 ${mode === m.id ? 'text-accent' : 'text-slate-500'}`}>
                   {m.icon}
                 </span>
-                <span className="flex flex-col gap-0.5">
+                <span className="flex flex-col gap-0.5 flex-1 min-w-0">
                   <span className="font-medium text-sm">{m.title}</span>
                   <span className="text-xs text-slate-500">{m.desc}</span>
                 </span>
-                {mode === m.id && <ChevronRight size={16} className="text-accent ml-auto mt-1 shrink-0" />}
+                {m.cost && <CostBadge label={m.cost} />}
+                {mode === m.id && !m.cost && <ChevronRight size={16} className="text-accent mt-1 shrink-0" />}
               </button>
             ))}
           </div>
@@ -226,10 +255,11 @@ export function NewProjectPage() {
                   <span className={`mt-0.5 shrink-0 ${subMode === s.id ? 'text-accent' : 'text-slate-500'}`}>
                     {s.icon}
                   </span>
-                  <span className="flex flex-col gap-0.5">
+                  <span className="flex flex-col gap-0.5 flex-1 min-w-0">
                     <span className="font-medium text-sm">{s.title}</span>
                     <span className="text-xs text-slate-500">{s.desc}</span>
                   </span>
+                  <CostBadge label={s.cost} />
                 </button>
               ))}
             </div>

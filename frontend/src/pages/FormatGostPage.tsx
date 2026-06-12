@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { FileText, Download } from 'lucide-react'
 import { FileDropZone } from '../components/FileDropZone'
 import { useToast } from '../components/Toast'
-import { apiPostFormBlob } from '../lib/api'
+import { apiPostFormBlob, ApiError } from '../lib/api'
 
 export function FormatGostPage() {
   const [file, setFile] = useState<File | null>(null)
@@ -27,7 +27,9 @@ export function FormatGostPage() {
       URL.revokeObjectURL(url)
       toast('Файл отформатирован и скачан', 'success')
     } catch (err: unknown) {
-      toast(err instanceof Error ? err.message : 'Ошибка форматирования', 'error')
+      if (!(err instanceof ApiError && err.status === 402)) {
+        toast(err instanceof Error ? err.message : 'Ошибка форматирования', 'error')
+      }
     } finally {
       setLoading(false)
     }

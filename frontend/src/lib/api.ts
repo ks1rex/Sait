@@ -7,14 +7,36 @@ async function authHeaders(): Promise<Record<string, string>> {
   return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}
 }
 
+// Typed API error — callers can check .status to distinguish 402 from other errors
+export class ApiError extends Error {
+  constructor(message: string, public readonly status: number) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
 async function handleResponse<T>(res: Response): Promise<T> {
   if (res.ok) return res.json() as Promise<T>
-  let msg = `HTTP ${res.status}`
-  try {
-    const body = await res.json()
-    msg = body?.detail?.error ?? body?.detail ?? msg
-  } catch { /* ignore parse error */ }
-  throw new Error(msg)
+
+  let body: Record<string, unknown> = {}
+  try { body = await res.json() } catch { /* ignore parse error */ }
+
+  if (res.status === 402) {
+    // Dispatch global event so InsufficientTokensModal can pick it up
+    window.dispatchEvent(new CustomEvent('insufficient-tokens', {
+      detail: { required: body.required ?? 0, balance: body.balance ?? 0 },
+    }))
+    throw new ApiError('Недостаточно токенов', 402)
+  }
+
+  const detail = body?.detail
+  const msg: string =
+    (typeof detail === 'object' && detail !== null && 'error' in detail
+      ? String((detail as Record<string, unknown>).error)
+      : typeof detail === 'string'
+      ? detail
+      : undefined) ?? `HTTP ${res.status}`
+  throw new ApiError(msg, res.status)
 }
 
 export async function apiGet<T>(path: string): Promise<T> {
@@ -58,9 +80,19 @@ export async function apiPostFormBlob(path: string, form: FormData): Promise<{ b
     body: form,
   })
   if (!res.ok) {
-    let msg = `HTTP ${res.status}`
-    try { const b = await res.json(); msg = b?.detail?.error ?? b?.detail ?? msg } catch { /* */ }
-    throw new Error(msg)
+    let body: Record<string, unknown> = {}
+    try { body = await res.json() } catch { /* */ }
+    if (res.status === 402) {
+      window.dispatchEvent(new CustomEvent('insufficient-tokens', {
+        detail: { required: body.required ?? 0, balance: body.balance ?? 0 },
+      }))
+      throw new ApiError('Недостаточно токенов', 402)
+    }
+    const detail = body?.detail
+    const msg = (typeof detail === 'object' && detail !== null && 'error' in detail
+      ? String((detail as Record<string, unknown>).error)
+      : typeof detail === 'string' ? detail : `HTTP ${res.status}`)
+    throw new ApiError(msg, res.status)
   }
   const cd = res.headers.get('content-disposition') ?? ''
   const match = cd.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/)

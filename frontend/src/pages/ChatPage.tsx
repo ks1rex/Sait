@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useParams } from 'react-router-dom'
 import { Send, Download, FileText, User, Bot, Loader2 } from 'lucide-react'
-import { apiGet, apiPost } from '../lib/api'
+import { apiGet, apiPost, ApiError } from '../lib/api'
 import { useToast } from '../components/Toast'
 import type { ChatMessage } from '../types'
 
@@ -65,7 +65,9 @@ export function ChatPage() {
       }
       setMessages(prev => [...prev, assistant])
     } catch (err: unknown) {
-      toast(err instanceof Error ? err.message : 'Ошибка', 'error')
+      if (!(err instanceof ApiError && err.status === 402)) {
+        toast(err instanceof Error ? err.message : 'Ошибка', 'error')
+      }
       // Remove optimistic message on failure
       setMessages(prev => prev.filter(m => m.id !== optimistic.id))
       setInput(text)
