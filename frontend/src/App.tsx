@@ -13,6 +13,7 @@ import { ReviewPage } from './pages/ReviewPage'
 import { ResultPage } from './pages/ResultPage'
 import { FormatGostPage } from './pages/FormatGostPage'
 import { ChatPage } from './pages/ChatPage'
+import { AdminPage } from './pages/AdminPage'
 
 function AppRoutes() {
   return (
@@ -64,6 +65,15 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <Layout><FormatGostPage /></Layout>
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/admin"
+        element={
+          <ProtectedRoute>
+            <Layout><AdminPage /></Layout>
           </ProtectedRoute>
         }
       />

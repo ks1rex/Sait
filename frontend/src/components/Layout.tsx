@@ -1,12 +1,12 @@
 import { useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { LogOut, BookOpen, PlusCircle, FileText, Coins } from 'lucide-react'
+import { LogOut, BookOpen, PlusCircle, FileText, Coins, Shield } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { useTokens } from '../contexts/TokenContext'
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth()
-  const { balance, unlimited, refreshBalance, openRedeem } = useTokens()
+  const { balance, unlimited, isAdmin, refreshBalance, openRedeem } = useTokens()
   const navigate = useNavigate()
 
   // Refresh balance every time a protected page mounts
@@ -34,6 +34,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
             <FileText size={15} />
             Форматировать
           </Link>
+          {isAdmin && (
+            <Link to="/admin" className="flex items-center gap-1.5 text-sm text-amber-400/80 hover:text-amber-300 transition-colors">
+              <Shield size={15} />
+              Админка
+            </Link>
+          )}
         </nav>
 
         <div className="flex items-center gap-3 text-sm text-slate-400">

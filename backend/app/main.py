@@ -20,11 +20,10 @@ from docx import Document
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt as jose_jwt
 from pydantic import BaseModel, Field, ValidationError
 
 from .ai_provider import AI_PROVIDER, chat_completion, extract_calculation_spec, extract_variant_inputs, generate_conclusion, minimal_edit_rewrite
+from .auth import get_current_user, CurrentUser
 from .calc_engine import CalcError, render_text_template, run_calculation
 from .docx_md_converter import docx_to_markdown, markdown_to_docx
 from .docx_generator import generate_docx
@@ -33,6 +32,7 @@ from .pdf_extract import extract_text_and_tables
 from .schemas import CalculationSpec
 from .billing import InsufficientTokensError, consume_tokens, get_token_cost
 from .supabase_client import get_supabase, get_supabase_as_user
+from . import admin as admin_module
 
 load_dotenv()
 
@@ -50,6 +50,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(admin_module.router)
+
 from fastapi import Request as _Request
 from fastapi.responses import JSONResponse as _JSONResponse
 
@@ -65,10 +67,8 @@ async def insufficient_tokens_handler(_req: _Request, exc: InsufficientTokensErr
     )
 
 # ---------------------------------------------------------------------------
-# Auth
+# Constants
 # ---------------------------------------------------------------------------
-
-_bearer = HTTPBearer()
 
 _PDF_CONTENT_TYPES = {"application/pdf", "application/octet-stream", "binary/octet-stream"}
 _TEXT_CONTENT_TYPES = {"text/plain", "text/csv"}
@@ -76,75 +76,6 @@ _TEXT_CONTENT_TYPES = {"text/plain", "text/csv"}
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 _MANIFEST_PATH = _TEMPLATES_DIR / "manifest.json"
 _VALID_GENERATION_MODES = {"universal", "fixed_template", "custom_template"}
-
-# JWKS cache — populated on first ES256 verification attempt
-_jwks_cache: list[dict] | None = None
-
-
-def _get_jwks() -> list[dict]:
-    """Fetch JWKS from Supabase and cache for the process lifetime."""
-    global _jwks_cache
-    if _jwks_cache is None:
-        import httpx as _httpx
-        url = os.environ["SUPABASE_URL"]
-        with _httpx.Client(trust_env=False) as _c:
-            r = _c.get(f"{url}/auth/v1/.well-known/jwks.json", timeout=10)
-        r.raise_for_status()
-        _jwks_cache = r.json().get("keys", [])
-    return _jwks_cache
-
-
-def _decode_jwt(token: str) -> dict:
-    """
-    Verify JWT supporting both HS256 (legacy API key) and ES256 (new key API).
-    Tries HS256 first; on failure fetches JWKS and tries ES256.
-    """
-    secret = os.environ.get("SUPABASE_JWT_SECRET", "")
-    # ── HS256 (legacy Supabase JWT secret) ──────────────────────────────────
-    if secret:
-        try:
-            return jose_jwt.decode(token, secret, algorithms=["HS256"], audience="authenticated")
-        except JWTError:
-            pass
-
-    # ── ES256 via JWKS (new Supabase key API) ────────────────────────────────
-    try:
-        header = jose_jwt.get_unverified_header(token)
-    except JWTError as exc:
-        raise JWTError(f"Malformed JWT header: {exc}") from exc
-
-    kid = header.get("kid")
-    alg = header.get("alg", "ES256")
-    keys = _get_jwks()
-    matching = [k for k in keys if k.get("kid") == kid] if kid else keys
-
-    last_exc: Exception = JWTError("No matching JWKS key found")
-    for jwk in matching:
-        try:
-            return jose_jwt.decode(token, jwk, algorithms=[alg], audience="authenticated")
-        except JWTError as exc:
-            last_exc = exc
-    raise last_exc
-
-
-async def get_current_user(
-    credentials: Annotated[HTTPAuthorizationCredentials, Depends(_bearer)],
-) -> dict:
-    try:
-        payload = _decode_jwt(credentials.credentials)
-        return {
-            "user_id": payload["sub"],
-            "email": payload.get("email", ""),
-            "jwt": credentials.credentials,
-        }
-    except JWTError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": f"Недействительный токен: {exc}"},
-        )
-
-
-CurrentUser = Annotated[dict, Depends(get_current_user)]
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +162,7 @@ class ChatResponse(BaseModel):
 class MeResponse(BaseModel):
     token_balance: int
     unlimited_access: bool
+    is_admin: bool = False
 
 
 class RedeemCodeRequest(BaseModel):
@@ -360,7 +292,7 @@ async def get_me(user: CurrentUser) -> MeResponse:
     db = get_supabase()
     result = (
         db.table("profiles")
-        .select("token_balance, unlimited_access")
+        .select("token_balance, unlimited_access, is_admin")
         .eq("id", user["user_id"])
         .single()
         .execute()
