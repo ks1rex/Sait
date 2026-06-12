@@ -32,6 +32,12 @@ def _make_interp_function(tables_by_id: Dict[str, "TableDef"]):  # noqa: F821
             raise ValueError(f"Таблица '{table_id}' не найдена в спецификации")
 
         xs, ys = table.x, table.y
+        if not xs or not ys:
+            raise ValueError(f"Таблица '{table_id}' пуста (нет точек x/y)")
+        if len(xs) != len(ys):
+            raise ValueError(
+                f"Таблица '{table_id}': разная длина столбцов x ({len(xs)}) и y ({len(ys)})"
+            )
         if x <= xs[0]:
             return ys[0]
         if x >= xs[-1]:
