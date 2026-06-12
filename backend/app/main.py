@@ -319,17 +319,22 @@ async def health() -> HealthResponse:
 async def get_me(user: CurrentUser) -> MeResponse:
     """Возвращает баланс токенов и флаг безлимитного доступа текущего пользователя."""
     db = get_supabase()
-    result = (
-        db.table("profiles")
-        .select("token_balance, unlimited_access, is_admin")
-        .eq("id", user["user_id"])
-        .single()
-        .execute()
-    )
-    if not result.data:
+    try:
+        result = (
+            db.table("profiles")
+            .select("token_balance, unlimited_access, is_admin")
+            .eq("id", user["user_id"])
+            .single()
+            .execute()
+        )
+        data = result.data
+    except Exception:
+        # .single() raises when the profile row is missing — report 404, not 500
+        data = None
+    if not data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail={"error": "Профиль не найден"})
-    return MeResponse(**result.data)
+    return MeResponse(**data)
 
 
 @app.post("/redeem-code", tags=["billing"])

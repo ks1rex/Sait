@@ -42,6 +42,10 @@ def _decode_jwt(token: str) -> dict:
 
     kid = header.get("kid")
     alg = header.get("alg", "ES256")
+    # JWKS keys are asymmetric public keys — never verify a symmetric alg
+    # against them (algorithm-confusion attack).
+    if alg not in ("ES256", "RS256"):
+        raise JWTError(f"Unsupported JWT algorithm: {alg}")
     keys = _get_jwks()
     matching = [k for k in keys if k.get("kid") == kid] if kid else keys
 

@@ -24,3 +24,18 @@ Severity: **critical** — эксплуатируемая уязвимость /
 /upload (валидный/битый PDF/битый режим), /spec свой-чужой, /compute без spec,
 /format-gost, /admin/* для админа и не-админа) — все OK. Vite dev-сервер
 поднимается, отдаёт 200.
+
+---
+
+## Категория 2. Безопасность — Auth и RLS
+
+| # | Severity | Файл | Проблема | Что сделано |
+|---|----------|------|----------|-------------|
+| 2.1 | critical | `supabase/migrations/0001_init.sql:128` (политика profiles) | RLS-политика `profiles: update own` фиксировала `has_access`/`unlimited_access`/`is_admin`, но **не** `token_balance`. Любой авторизованный пользователь мог прямым PATCH'ем через публичный anon-key выставить себе любой баланс токенов — полный обход биллинга. | Миграция `0009_rls_hardening.sql`: в `WITH CHECK` добавлено `token_balance = (old)`. Проверено атакой anon-key PATCH → теперь **HTTP 403** (было бы 200). |
+| 2.2 | high | `supabase/migrations/0001_init.sql:140` (политика access_codes) | Политика `access_codes: select any unused` (`used_by IS NULL`) позволяла любому пользователю прочитать **все** неиспользованные коды (текст + номинал в токенах) прямым SELECT через anon-key и активировать их бесплатно. `redeem_code()` — SECURITY DEFINER и в этой политике не нуждается. | Миграция `0009`: политика заменена на `used_by = auth.uid()` (видишь только свои активированные). Проверено: SELECT неиспользованных → пустой список. |
+| 2.3 | medium | `backend/app/auth.py:44` | `_decode_jwt` брал `alg` из заголовка токена и передавал в `jwt.decode` против JWKS-ключей без allowlist — потенциальная algorithm-confusion атака (подмена alg). | Добавлен allowlist: для JWKS-ветки разрешены только `ES256`/`RS256` (асимметричные); прочее → JWTError. HS256 верифицируется отдельной веткой по shared-secret. |
+| 2.4 | low | `backend/app/admin.py:20`, `main.py:/me` | `.single()` бросает исключение при отсутствии строки профиля → необработанный 500 вместо 403/404. | Обёрнуто в try/except: нет профиля → не-админ (403) для admin-зависимости, 404 для `/me`. |
+| 2.5 | ok | storage policies, backend ownership | Storage-политики `uploads`/`outputs` ограничивают доступ по `{user_id}/...` префиксу (`foldername[1] = auth.uid()`). Все backend-эндпоинты грузят проект через `_require_project(project_id, user_id)` с `.eq("user_id", ...)` — чужой `project_id` даёт 404. `require_admin` сверяет `is_admin` через service-role. DEV_MODE отсутствует. | Без изменений. |
+
+Проверка: миграция применена (`supabase db push`), две RLS-атаки через anon-key
+дают 403 / пустой результат, smoke-тест — все 17 проверок OK.

@@ -19,14 +19,19 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 async def _require_admin(user: Annotated[dict, Depends(get_current_user)]) -> dict:
     db = get_supabase()
-    result = (
-        db.table("profiles")
-        .select("is_admin")
-        .eq("id", user["user_id"])
-        .single()
-        .execute()
-    )
-    if not result.data or not result.data.get("is_admin"):
+    try:
+        result = (
+            db.table("profiles")
+            .select("is_admin")
+            .eq("id", user["user_id"])
+            .single()
+            .execute()
+        )
+        is_admin = bool(result.data and result.data.get("is_admin"))
+    except Exception:
+        # missing profile row → .single() raises; treat as not admin
+        is_admin = False
+    if not is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"error": "Требуются права администратора"},
