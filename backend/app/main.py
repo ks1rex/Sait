@@ -1981,15 +1981,9 @@ async def format_gost(
             detail={"error": "Поддерживаются только файлы .docx"},
         )
 
-    # Consume tokens BEFORE processing — if insufficient, return 402 immediately
-    if user:
-        consume_tokens(
-            get_supabase_as_user(user["jwt"]),
-            amount=get_token_cost("format_gost"),
-            reason="format_gost",
-        )
-
-    file_bytes = await file.read()
+    # Validate the file (size, emptiness, real docx) BEFORE charging tokens,
+    # so a rejected upload never costs the user.
+    file_bytes = await _read_limited(file, "Документ")
     if not file_bytes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -2002,6 +1996,14 @@ async def format_gost(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": f"Не удалось открыть файл как .docx: {exc}"},
+        )
+
+    # Consume tokens only after the input is known good.
+    if user:
+        consume_tokens(
+            get_supabase_as_user(user["jwt"]),
+            amount=get_token_cost("format_gost"),
+            reason="format_gost",
         )
 
     try:
