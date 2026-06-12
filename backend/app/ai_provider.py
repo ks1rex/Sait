@@ -352,6 +352,38 @@ def minimal_edit_rewrite(
     )
 
 
+class ChatCompletionResult(NamedTuple):
+    content: str
+    provider: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+
+
+def chat_completion(messages: list[dict]) -> ChatCompletionResult:
+    """
+    General-purpose chat completion for the interactive document-editing chat.
+    Uses the fallback (more capable) model with a large token budget.
+    """
+    cfg = PROVIDER_CONFIG[AI_PROVIDER]
+    model = cfg["fallback_model"]
+    client = _client()
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        max_tokens=32000,
+    )
+    content = response.choices[0].message.content or ""
+    usage = response.usage
+    return ChatCompletionResult(
+        content=content,
+        provider=AI_PROVIDER,
+        model=model,
+        input_tokens=usage.prompt_tokens if usage else 0,
+        output_tokens=usage.completion_tokens if usage else 0,
+    )
+
+
 def generate_conclusion(spec_dict: dict, computed_results: dict) -> str:
     """
     Генерирует текст заключения на основе conclusion_instructions

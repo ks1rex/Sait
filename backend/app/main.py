@@ -24,7 +24,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt as jose_jwt
 from pydantic import BaseModel, Field, ValidationError
 
-from .ai_provider import AI_PROVIDER, extract_calculation_spec, extract_variant_inputs, generate_conclusion, minimal_edit_rewrite
+from .ai_provider import AI_PROVIDER, chat_completion, extract_calculation_spec, extract_variant_inputs, generate_conclusion, minimal_edit_rewrite
 from .calc_engine import CalcError, render_text_template, run_calculation
 from .docx_md_converter import docx_to_markdown, markdown_to_docx
 from .docx_generator import generate_docx
@@ -146,6 +146,23 @@ class TemplateInfo(BaseModel):
     work_type: str = ""
     description: str = ""
     spec_file: str
+
+
+class ChatMessageIn(BaseModel):
+    message: str
+
+
+class ChatMessageOut(BaseModel):
+    id: str
+    role: str
+    content: str
+    created_at: str
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    docx_url: str
+    pdf_url: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -377,110 +394,105 @@ async def upload_pdf(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"error": f"Недопустимый sub_mode '{effective_sub_mode}'. Допустимые: {sorted(_VALID_SUB_MODES)}"},
             )
-        if effective_sub_mode not in ("format_only", "minimal_edit"):
-            raise HTTPException(
-                status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                detail={"error": f"sub_mode='{effective_sub_mode}' ещё не реализован"},
-            )
-
-        # Validate template file (required for all custom sub_modes)
-        if not template or not template.filename:
+        # chat allows both files to be absent (generation from scratch)
+        # minimal_edit: template required, task required
+        # format_only:  template required, task ignored
+        if effective_sub_mode in ("format_only", "minimal_edit") and (not template or not template.filename):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"error": "Для custom_template необходимо передать файл template (.docx или .pdf)"},
             )
-
-        # minimal_edit additionally requires a task (new condition/variant)
         if effective_sub_mode == "minimal_edit" and (not task or not task.filename):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"error": "Для sub_mode='minimal_edit' необходим файл task (PDF или TXT с новым заданием)"},
             )
 
-        tpl_filename = template.filename or "template"
-        tpl_ext = os.path.splitext(tpl_filename)[1].lower()
-        tpl_is_pdf = tpl_ext == ".pdf" or template.content_type in _PDF_CONTENT_TYPES
-        tpl_is_docx = tpl_ext == ".docx" or template.content_type == _DOCX_CONTENT_TYPE
-        if not (tpl_is_pdf or tpl_is_docx):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"error": "Шаблон должен быть файлом .docx или .pdf"},
-            )
-
-        tpl_bytes = await template.read()
-        if not tpl_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"error": "Файл шаблона пустой"},
-            )
-
-        # Convert PDF → docx via LibreOffice if needed
-        ct_docx_bytes: bytes
-        if tpl_is_pdf:
-            _validate_pdf_bytes(tpl_bytes, "Шаблон")
-            try:
-                with tempfile.TemporaryDirectory() as tmp_conv:
-                    pdf_tmp = os.path.join(tmp_conv, "input.pdf")
-                    with open(pdf_tmp, "wb") as f:
-                        f.write(tpl_bytes)
-                    subprocess.run(
-                        [_SOFFICE_BIN, "--headless", "--convert-to", "docx", "--outdir", tmp_conv, pdf_tmp],
-                        check=True, capture_output=True, timeout=_SOFFICE_TIMEOUT,
+        # ── Process template file (present for format_only/minimal_edit; optional for chat) ──
+        tpl_filename: str | None = None
+        ct_docx_bytes: bytes | None = None
+        if template and template.filename:
+            tpl_filename = template.filename
+            tpl_ext = os.path.splitext(tpl_filename)[1].lower()
+            tpl_is_pdf = tpl_ext == ".pdf" or template.content_type in _PDF_CONTENT_TYPES
+            tpl_is_docx = tpl_ext == ".docx" or template.content_type == _DOCX_CONTENT_TYPE
+            if not (tpl_is_pdf or tpl_is_docx):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error": "Шаблон должен быть файлом .docx или .pdf"},
+                )
+            tpl_bytes = await template.read()
+            if not tpl_bytes:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error": "Файл шаблона пустой"},
+                )
+            if tpl_is_pdf:
+                _validate_pdf_bytes(tpl_bytes, "Шаблон")
+                try:
+                    with tempfile.TemporaryDirectory() as tmp_conv:
+                        pdf_tmp = os.path.join(tmp_conv, "input.pdf")
+                        with open(pdf_tmp, "wb") as f:
+                            f.write(tpl_bytes)
+                        subprocess.run(
+                            [_SOFFICE_BIN, "--headless", "--convert-to", "docx", "--outdir", tmp_conv, pdf_tmp],
+                            check=True, capture_output=True, timeout=_SOFFICE_TIMEOUT,
+                        )
+                        docx_tmp = os.path.join(tmp_conv, "input.docx")
+                        if not os.path.exists(docx_tmp):
+                            raise RuntimeError("LibreOffice не создал .docx")
+                        with open(docx_tmp, "rb") as f:
+                            ct_docx_bytes = f.read()
+                except FileNotFoundError:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail={"error": "LibreOffice (soffice) не установлен — не удалось конвертировать PDF в docx"},
                     )
-                    docx_tmp = os.path.join(tmp_conv, "input.docx")
-                    if not os.path.exists(docx_tmp):
-                        raise RuntimeError("LibreOffice не создал .docx")
-                    with open(docx_tmp, "rb") as f:
-                        ct_docx_bytes = f.read()
-            except FileNotFoundError:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail={"error": "LibreOffice (soffice) не установлен — не удалось конвертировать PDF в docx"},
-                )
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError) as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail={"error": f"Ошибка конвертации PDF → docx: {exc}"},
-                )
-        else:
-            ct_docx_bytes = tpl_bytes
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError) as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail={"error": f"Ошибка конвертации PDF → docx: {exc}"},
+                    )
+            else:
+                ct_docx_bytes = tpl_bytes
 
-        # Read task file for minimal_edit
+        # ── Process task file (required for minimal_edit; optional for chat) ──
         ct_task_bytes: bytes | None = None
         ct_task_filename: str | None = None
-        if effective_sub_mode == "minimal_edit":
-            ct_task_bytes = await task.read()  # type: ignore[union-attr]
+        if task and task.filename and effective_sub_mode in ("minimal_edit", "chat"):
+            ct_task_bytes = await task.read()
             if not ct_task_bytes:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail={"error": "Файл задания (task) пустой"},
                 )
-            ct_task_filename = task.filename or "task"  # type: ignore[union-attr]
+            ct_task_filename = task.filename
 
+        # ── Upload to Storage ──────────────────────────────────────────────────
         ct_project_id = str(uuid.uuid4())
         ct_user_id: str = user["user_id"]
         ct_db = get_supabase()
-        ct_storage_path = f"{ct_user_id}/{ct_project_id}/template.docx"
 
-        # Upload template docx
-        try:
-            ct_db.storage.from_("uploads").upload(
-                path=ct_storage_path,
-                file=ct_docx_bytes,
-                file_options={"content-type": _DOCX_CONTENT_TYPE},
-            )
-        except Exception as exc:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={"error": f"Ошибка загрузки шаблона в хранилище: {exc}"},
-            )
+        ct_storage_path: str | None = None
+        if ct_docx_bytes:
+            ct_storage_path = f"{ct_user_id}/{ct_project_id}/template.docx"
+            try:
+                ct_db.storage.from_("uploads").upload(
+                    path=ct_storage_path,
+                    file=ct_docx_bytes,
+                    file_options={"content-type": _DOCX_CONTENT_TYPE},
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={"error": f"Ошибка загрузки шаблона в хранилище: {exc}"},
+                )
 
-        # Upload task file (minimal_edit only)
         ct_task_storage_path: str | None = None
         if ct_task_bytes and ct_task_filename:
             task_ext = os.path.splitext(ct_task_filename)[1].lower()
             task_is_txt = task_ext == ".txt" or (task and task.content_type in _TEXT_CONTENT_TYPES)
-            ct_task_storage_path = f"{ct_user_id}/{ct_project_id}/task{''.join(['.txt' if task_is_txt else '.pdf'])}"
+            ct_task_storage_path = f"{ct_user_id}/{ct_project_id}/task{'.txt' if task_is_txt else '.pdf'}"
             task_ct = "text/plain" if task_is_txt else "application/pdf"
             try:
                 ct_db.storage.from_("uploads").upload(
@@ -489,16 +501,17 @@ async def upload_pdf(
                     file_options={"content-type": task_ct},
                 )
             except Exception as exc:
-                try:
-                    ct_db.storage.from_("uploads").remove([ct_storage_path])
-                except Exception:
-                    pass
+                if ct_storage_path:
+                    try:
+                        ct_db.storage.from_("uploads").remove([ct_storage_path])
+                    except Exception:
+                        pass
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail={"error": f"Ошибка загрузки задания в хранилище: {exc}"},
                 )
 
-        ct_title = os.path.splitext(tpl_filename)[0]
+        ct_title = os.path.splitext(tpl_filename)[0] if tpl_filename else "Новый документ"
         try:
             ct_db.table("projects").insert({
                 "id": ct_project_id,
@@ -508,23 +521,20 @@ async def upload_pdf(
                 "generation_mode": "custom_template",
             }).execute()
         except Exception as exc:
-            paths_to_remove = [ct_storage_path]
-            if ct_task_storage_path:
-                paths_to_remove.append(ct_task_storage_path)
-            try:
-                ct_db.storage.from_("uploads").remove(paths_to_remove)
-            except Exception:
-                pass
+            paths_to_remove = [p for p in [ct_storage_path, ct_task_storage_path] if p]
+            if paths_to_remove:
+                try:
+                    ct_db.storage.from_("uploads").remove(paths_to_remove)
+                except Exception:
+                    pass
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail={"error": f"Ошибка создания проекта в БД: {exc}"},
             )
 
-        ct_record: dict = {
-            "project_id": ct_project_id,
-            "source_storage_path": ct_storage_path,
-            "sub_mode": effective_sub_mode,
-        }
+        ct_record: dict = {"project_id": ct_project_id, "sub_mode": effective_sub_mode}
+        if ct_storage_path:
+            ct_record["source_storage_path"] = ct_storage_path
         if ct_task_storage_path:
             ct_record["task_storage_path"] = ct_task_storage_path
         try:
@@ -535,11 +545,13 @@ async def upload_pdf(
                 detail={"error": f"Ошибка записи custom_templates: {exc}"},
             )
 
-        uploaded_files = [UploadedFile(
-            file_type="template",
-            storage_path=ct_storage_path,
-            original_name=tpl_filename,
-        )]
+        uploaded_files = []
+        if ct_storage_path and tpl_filename:
+            uploaded_files.append(UploadedFile(
+                file_type="template",
+                storage_path=ct_storage_path,
+                original_name=tpl_filename,
+            ))
         if ct_task_storage_path and ct_task_filename:
             uploaded_files.append(UploadedFile(
                 file_type="task",
@@ -1026,6 +1038,13 @@ async def extract_spec(
                 "pdf_url": me_pdf_url,
             })
 
+        if ct_sub_mode == "chat":
+            return JSONResponse(content={
+                "project_id": project_id,
+                "mode": "chat",
+                "message": "Используйте POST /chat/{project_id} для интерактивного редактирования",
+            })
+
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
             detail={"error": f"sub_mode='{ct_sub_mode}' ещё не реализован"},
@@ -1185,6 +1204,7 @@ async def get_spec(project_id: str, user: CurrentUser):
         _ct_messages = {
             "format_only": "Документ отформатирован по ГОСТ, доступен для скачивания",
             "minimal_edit": "Документ переработан с минимальными изменениями, доступен для скачивания",
+            "chat": "Интерактивный режим — используйте POST /chat/{project_id} для редактирования",
         }
         if sub_mode in _ct_messages:
             return JSONResponse(content={"mode": sub_mode, "message": _ct_messages[sub_mode]})
@@ -1217,6 +1237,303 @@ async def update_spec(project_id: str, spec: CalculationSpec, user: CurrentUser)
     ).eq("project_id", project_id).execute()
 
     return spec
+
+
+# ---------------------------------------------------------------------------
+# Chat constants & helpers
+# ---------------------------------------------------------------------------
+
+_CHAT_SYSTEM_PROMPT = (
+    "Ты помогаешь редактировать техническую работу. ВСЕГДА оформляй "
+    "результат по ГОСТ (Times New Roman 14pt, поля 30/10/20/20мм, "
+    "межстрочный интервал 1.5, выравнивание по ширине, заголовки с "
+    "отступом 1.25см) — ЕСЛИ пользователь явно не попросил иначе.\n"
+    "Все остальные требования по содержанию, структуре, формулировкам — "
+    "бери из сообщений пользователя.\n"
+    "Отвечай строго в следующем формате:\n"
+    "1. Markdown-представление ПОЛНОГО актуального текста документа "
+    "(не diff, а целиком). Используй # для Заголовка 1, ## для Заголовка 2, "
+    "| для таблиц.\n"
+    "2. Строка-разделитель: <!-- REPLY -->\n"
+    "3. Короткий комментарий (1-2 предложения): что именно изменено или добавлено."
+)
+
+# Фразы, при наличии которых в истории apply_gost_styles НЕ применяется
+_NO_GOST_PHRASES = (
+    "не по гост", "без гост", "другой шрифт", "другое форматирование",
+    "другой стиль", "arial", "calibri", "verdana", "без отступ",
+)
+
+
+def _should_apply_gost(chat_history: list[dict]) -> bool:
+    """Return False if any user message contains an explicit non-GOST formatting request."""
+    for msg in chat_history:
+        if msg.get("role") == "user":
+            text = msg.get("content", "").lower()
+            if any(phrase in text for phrase in _NO_GOST_PHRASES):
+                return False
+    return True
+
+
+def _parse_chat_response(full_content: str) -> tuple[str, str]:
+    """
+    Split AI response on <!-- REPLY --> marker.
+    Returns (doc_markdown, reply_comment).
+    If marker absent, whole content is used as doc_markdown.
+    """
+    parts = full_content.split("<!-- REPLY -->", 1)
+    doc_md = parts[0].strip()
+    reply = parts[1].strip() if len(parts) > 1 else "Документ обновлён."
+    return doc_md, reply
+
+
+# ---------------------------------------------------------------------------
+# Chat endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/chat/{project_id}", response_model=ChatResponse, tags=["chat"])
+async def chat_turn(
+    project_id: str,
+    body: ChatMessageIn,
+    user: CurrentUser,
+) -> ChatResponse:
+    """
+    One turn of the interactive document-editing chat.
+    Saves user message, calls AI with full context, updates the draft docx/pdf,
+    saves assistant reply, returns signed URLs to the new draft.
+    """
+    db = get_supabase()
+    user_id: str = user["user_id"]
+
+    # 1. Verify project ownership and generation_mode
+    project = _require_project(project_id, user_id)
+    if project.get("generation_mode") != "custom_template":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Чат доступен только для проектов с generation_mode='custom_template'"},
+        )
+
+    # 2. Load custom_templates record
+    ct_row = (
+        db.table("custom_templates")
+        .select("source_storage_path, task_storage_path, sub_mode")
+        .eq("project_id", project_id)
+        .execute()
+    )
+    if not ct_row.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "Запись custom_templates не найдена"},
+        )
+    ct_info = ct_row.data[0]
+    ct_source_path: str | None = ct_info.get("source_storage_path")
+    ct_task_path: str | None = ct_info.get("task_storage_path")
+
+    # 3. Load existing chat history (ordered by created_at)
+    hist_result = (
+        db.table("chat_messages")
+        .select("id, role, content, created_at")
+        .eq("project_id", project_id)
+        .order("created_at")
+        .execute()
+    )
+    history: list[dict] = hist_result.data or []
+    is_first_turn = not history
+
+    # 4. Save user message to DB BEFORE calling AI (so retry is safe)
+    try:
+        db.table("chat_messages").insert({
+            "project_id": project_id,
+            "role": "user",
+            "content": body.message,
+        }).execute()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": f"Ошибка сохранения сообщения: {exc}"},
+        )
+
+    # 5. Build messages list for AI
+    ai_messages: list[dict] = [{"role": "system", "content": _CHAT_SYSTEM_PROMPT}]
+
+    # On first turn (or always): inject template + task as context
+    # These are NOT stored in DB — they're re-injected each turn for consistency
+    if ct_source_path:
+        try:
+            tpl_bytes = db.storage.from_("uploads").download(ct_source_path)
+            tpl_doc = Document(io.BytesIO(tpl_bytes))
+            template_md = docx_to_markdown(tpl_doc)
+            ai_messages.append({
+                "role": "user",
+                "content": f"Исходный шаблон документа (Markdown):\n\n{template_md}",
+            })
+            ai_messages.append({
+                "role": "assistant",
+                "content": "Исходный шаблон принят. Готов работать с документом.",
+            })
+        except Exception:
+            pass  # template unavailable — continue without it
+
+    if ct_task_path:
+        try:
+            task_bytes = db.storage.from_("uploads").download(ct_task_path)
+            task_ext = ct_task_path.rsplit(".", 1)[-1].lower() if "." in ct_task_path else ""
+            task_ct = "text/plain" if task_ext == "txt" else "application/pdf"
+            task_text = _bytes_to_text(task_bytes, ct_task_path, task_ct)
+            if task_text.strip():
+                ai_messages.append({
+                    "role": "user",
+                    "content": f"Условие / задание:\n\n{task_text}",
+                })
+                ai_messages.append({
+                    "role": "assistant",
+                    "content": "Задание принято.",
+                })
+        except Exception:
+            pass
+
+    # Append real chat history (user/assistant turns from DB)
+    for msg in history:
+        ai_messages.append({"role": msg["role"], "content": msg["content"]})
+
+    # Current user message
+    ai_messages.append({"role": "user", "content": body.message})
+
+    # 6. Call AI
+    try:
+        ai_result = chat_completion(ai_messages)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"error": f"Ошибка при обращении к AI: {exc}"},
+        )
+
+    full_response = ai_result.content
+    doc_markdown, reply_comment = _parse_chat_response(full_response)
+
+    # 7. Save assistant message to DB
+    try:
+        db.table("chat_messages").insert({
+            "project_id": project_id,
+            "role": "assistant",
+            "content": full_response,
+        }).execute()
+    except Exception:
+        pass  # non-fatal — docx still gets built
+
+    # 8. Build docx from AI markdown response
+    apply_gost = _should_apply_gost(history + [{"role": "user", "content": body.message}])
+    try:
+        chat_doc = Document()
+        if apply_gost:
+            apply_gost_styles(chat_doc)
+        markdown_to_docx(doc_markdown, chat_doc)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": f"Ошибка сборки docx из ответа AI: {exc}"},
+        )
+
+    # 9. Save docx + pdf to outputs (upsert — overwrite previous draft)
+    draft_docx_path = f"{user_id}/{project_id}/chat_draft.docx"
+    draft_pdf_path = f"{user_id}/{project_id}/chat_draft.pdf"
+
+    with tempfile.TemporaryDirectory() as tmp_chat:
+        chat_docx_file = os.path.join(tmp_chat, "chat_draft.docx")
+        chat_doc.save(chat_docx_file)
+        with open(chat_docx_file, "rb") as f:
+            chat_docx_bytes = f.read()
+
+        chat_pdf_bytes: bytes | None = None
+        try:
+            subprocess.run(
+                [_SOFFICE_BIN, "--headless", "--convert-to", "pdf", "--outdir", tmp_chat, chat_docx_file],
+                check=True, capture_output=True, timeout=_SOFFICE_TIMEOUT,
+            )
+            chat_pdf_file = os.path.join(tmp_chat, "chat_draft.pdf")
+            if os.path.exists(chat_pdf_file):
+                with open(chat_pdf_file, "rb") as f:
+                    chat_pdf_bytes = f.read()
+        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass
+
+    try:
+        db.storage.from_("outputs").upload(
+            path=draft_docx_path,
+            file=chat_docx_bytes,
+            file_options={"content-type": _DOCX_CONTENT_TYPE, "upsert": "true"},
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": f"Ошибка загрузки черновика в хранилище: {exc}"},
+        )
+
+    if chat_pdf_bytes:
+        try:
+            db.storage.from_("outputs").upload(
+                path=draft_pdf_path,
+                file=chat_pdf_bytes,
+                file_options={"content-type": "application/pdf", "upsert": "true"},
+            )
+        except Exception:
+            pass
+
+    # 10. Generate signed URLs and update project
+    try:
+        docx_url = db.storage.from_("outputs").create_signed_url(draft_docx_path, 3600)["signedURL"]
+    except Exception:
+        docx_url = ""
+
+    pdf_url: str | None = None
+    if chat_pdf_bytes:
+        try:
+            pdf_url = db.storage.from_("outputs").create_signed_url(draft_pdf_path, 3600)["signedURL"]
+        except Exception:
+            pass
+
+    upd: dict = {"status": "computed", "output_docx_path": draft_docx_path}
+    if chat_pdf_bytes:
+        upd["output_pdf_path"] = draft_pdf_path
+    db.table("projects").update(upd).eq("id", project_id).execute()
+
+    # 11. Log token usage (non-fatal)
+    try:
+        db.table("ai_usage").insert({
+            "user_id": user_id,
+            "project_id": project_id,
+            "provider": AI_PROVIDER,
+            "model": ai_result.model,
+            "input_tokens": ai_result.input_tokens,
+            "output_tokens": ai_result.output_tokens,
+        }).execute()
+    except Exception:
+        pass
+
+    return ChatResponse(reply=reply_comment, docx_url=docx_url, pdf_url=pdf_url)
+
+
+@app.get("/chat/{project_id}", response_model=List[ChatMessageOut], tags=["chat"])
+async def get_chat_history(project_id: str, user: CurrentUser) -> List[ChatMessageOut]:
+    """Возвращает всю историю сообщений чата для проекта в хронологическом порядке."""
+    _require_project(project_id, user["user_id"])
+    db = get_supabase()
+    result = (
+        db.table("chat_messages")
+        .select("id, role, content, created_at")
+        .eq("project_id", project_id)
+        .order("created_at")
+        .execute()
+    )
+    return [
+        ChatMessageOut(
+            id=row["id"],
+            role=row["role"],
+            content=row["content"],
+            created_at=row["created_at"],
+        )
+        for row in (result.data or [])
+    ]
 
 
 @app.post("/compute", response_model=ComputeResponse, tags=["projects"])
