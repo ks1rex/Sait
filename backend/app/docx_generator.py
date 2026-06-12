@@ -82,13 +82,21 @@ def _substitute_values(formula: str, formatted: dict[str, str]) -> str:
 
 
 def _natural_decimals(value) -> int:
-    """Return the number of non-zero decimal digits of a numeric value."""
+    """
+    Number of significant decimal digits of a numeric value (capped at 10).
+    Uses fixed-point formatting so small magnitudes that repr() would render
+    in scientific notation (e.g. 1e-05) are still measured correctly.
+    """
     if isinstance(value, int):
         return 0
-    s = str(float(value))
+    f = float(value)
+    if f == int(f):
+        return 0
+    # %.10f never uses scientific notation; strip trailing zeros to get the
+    # natural precision without the artefacts of binary float repr.
+    s = f"{f:.10f}".rstrip('0')
     if '.' in s:
-        frac = s.split('.')[1].rstrip('0')
-        return len(frac) if frac else 0
+        return len(s.split('.')[1])
     return 0
 
 
