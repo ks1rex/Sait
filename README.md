@@ -64,8 +64,10 @@ docker run -p 8000:8000 --env-file .env gost-calc-backend
 ```bash
 cd frontend
 npm install
-# Создать frontend/.env.local:
-# VITE_API_URL=http://localhost:8000
+# Создать frontend/.env.local на основе frontend/.env.example:
+# VITE_API_BASE_URL=http://localhost:8000
+# VITE_SUPABASE_URL=https://<project-ref>.supabase.co
+# VITE_SUPABASE_ANON_KEY=<anon-key>
 
 npm run dev
 ```
@@ -82,20 +84,30 @@ npm run dev
     billing.py           — токены, списание, коды доступа
     schemas.py           — Pydantic-модели (CalculationSpec и др.)
     pdf_extract.py       — извлечение текста из PDF
-    calc_engine.py       — движок последовательных вычислений
-    docx_generator.py    — генерация отчёта по ГОСТ
+    calc_engine.py       — движок последовательных вычислений (multi-pass)
+    docx_generator.py    — генерация отчёта по ГОСТ (python-docx)
+    docx_md_converter.py — конвертация Markdown → docx-параграфы
+    gost_styles.py       — стили ГОСТ для python-docx
     supabase_client.py   — клиент Supabase (service role)
+  /prompts
+    extraction_system_prompt.txt — системный промпт для DeepSeek
   requirements.txt
   Dockerfile
+  smoke_test.py          — 17 автоматических проверок (health, auth, compute...)
   .env.example
 /frontend                — React + Vite + Tailwind SPA
   /src
-    /pages               — LoginPage, DashboardPage, NewProjectPage, AdminPage...
+    /pages               — LoginPage, DashboardPage, NewProjectPage,
+                           ReviewPage, ResultPage, ChatPage,
+                           FormatGostPage, AdminPage
     /contexts            — AuthContext, TokenContext
-    /components          — Layout, Toast, RedeemModal...
-  vercel.json
+    /components          — Layout, Toast, RedeemModal,
+                           InsufficientTokensModal, FileDropZone,
+                           StatusBadge, ProtectedRoute
+  vercel.json            — SPA rewrite-правила (на случай деплоя на Vercel)
+  .env.example
 /supabase
-  /migrations            — SQL миграции схемы БД
+  /migrations            — SQL-миграции схемы БД (0001–0010)
 /.github/workflows
   deploy-frontend.yml    — GitHub Actions: build + deploy to gh-pages
 render.yaml              — Render.com: Docker web service config
