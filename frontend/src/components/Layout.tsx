@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { LogOut, BookOpen, PlusCircle, FileText, Coins, Shield } from 'lucide-react'
+import { LogOut, PlusCircle, FileText, Coins, Shield } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { useTokens } from '../contexts/TokenContext'
 
@@ -21,7 +21,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen bg-navy text-slate-100 flex flex-col">
       <header className="bg-navy-light border-b border-slate-700 px-6 py-3 flex items-center gap-6">
         <Link to="/" className="flex items-center gap-2 font-bold text-accent text-lg shrink-0">
-          <BookOpen size={20} />
+          <img src="/logo-192.png" alt="" className="w-8 h-8 rounded-md object-cover" />
           ГОСТ Калькулятор
         </Link>
 
