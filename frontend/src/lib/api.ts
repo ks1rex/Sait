@@ -23,6 +23,12 @@ async function handleResponse<T>(res: Response): Promise<T> {
   let body: Record<string, unknown> = {}
   try { body = await res.json() } catch { /* ignore parse error */ }
 
+  if (res.status === 401) {
+    // Session expired / invalid token — sign out globally and redirect to login
+    window.dispatchEvent(new CustomEvent('unauthorized'))
+    throw new ApiError('Сессия истекла. Войдите снова.', 401)
+  }
+
   if (res.status === 402) {
     // Dispatch global event so InsufficientTokensModal can pick it up
     window.dispatchEvent(new CustomEvent('insufficient-tokens', {
@@ -84,6 +90,10 @@ export async function apiPostFormBlob(path: string, form: FormData): Promise<{ b
   if (!res.ok) {
     let body: Record<string, unknown> = {}
     try { body = await res.json() } catch { /* */ }
+    if (res.status === 401) {
+      window.dispatchEvent(new CustomEvent('unauthorized'))
+      throw new ApiError('Сессия истекла. Войдите снова.', 401)
+    }
     if (res.status === 402) {
       window.dispatchEvent(new CustomEvent('insufficient-tokens', {
         detail: { required: body.required ?? 0, balance: body.balance ?? 0 },

@@ -1,5 +1,5 @@
 import sharp from 'sharp'
-import toIco from 'to-ico'
+import pngToIco from 'png-to-ico'
 import { writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
@@ -27,7 +27,7 @@ async function main() {
   const icoBuffers = await Promise.all(
     [16, 32, 48].map(size => sharp(src).resize(size, size).png().toBuffer())
   )
-  const icoData = await toIco(icoBuffers)
+  const icoData = await pngToIco(icoBuffers)
   writeFileSync(join(publicDir, 'favicon.ico'), icoData)
   console.log('  ✓ favicon.ico  (16/32/48 px)')
 }

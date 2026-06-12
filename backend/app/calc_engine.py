@@ -51,11 +51,32 @@ def _make_interp_function(tables_by_id: Dict[str, "TableDef"]):  # noqa: F821
     return interp
 
 
+def _eval_step(aeval: Interpreter, step) -> tuple[float | None, list[str]]:
+    """
+    Evaluate one step's formula. Returns (value, error_types).
+    error_types is a list of asteval error class names (empty on success).
+    """
+    aeval.error = []
+    value = aeval.eval(step.formula, show_errors=False)
+    if aeval.error:
+        return None, [e.get_error()[0] for e in aeval.error]
+    return value, []
+
+
 def run_calculation(spec: CalculationSpec) -> Dict[str, float]:
     """
     Возвращает плоский словарь {id: значение} — все input_data и все
     результаты шагов. Также мутирует spec.sections[*].steps[*].value
     (для удобства последующей генерации документа).
+
+    Порядок вычисления: шаги считаются в порядке из spec, но если шаг
+    ссылается на ещё не определённую переменную (forward-reference из-за
+    неидеального порядка от AI), он откладывается и повторяется в следующем
+    проходе. Так корректно упорядоченные spec считаются за один проход
+    идентично прежнему поведению, а слегка переставленные — всё равно
+    разрешаются по фактическим зависимостям (поле depends_on не требуется
+    идеально заполненным). Реальные ошибки (деление на ноль, неизвестная
+    функция) поднимаются сразу.
     """
     aeval = Interpreter()
 
@@ -79,15 +100,28 @@ def run_calculation(spec: CalculationSpec) -> Dict[str, float]:
     tables_by_id = {t.id: t for t in spec.tables}
     aeval.symtable["interp"] = _make_interp_function(tables_by_id)
 
-    # 3. Последовательно считаем шаги
-    for section in spec.sections:
-        for step in section.steps:
-            aeval.error = []
-            value = aeval.eval(step.formula)
+    # 3. Считаем шаги многопроходно по фактическим зависимостям
+    pending = [step for section in spec.sections for step in section.steps]
+    last_nameerror: Dict[str, str] = {}
 
-            if aeval.error:
-                error_msgs = "; ".join(str(e.get_error()) for e in aeval.error)
-                raise CalcError(step.id, f"{step.formula!r} -> {error_msgs}")
+    while pending:
+        still_pending = []
+        made_progress = False
+
+        for step in pending:
+            value, error_types = _eval_step(aeval, step)
+
+            if error_types:
+                # Чистый NameError → возможно forward-reference, отложим.
+                if all(t == "NameError" for t in error_types):
+                    last_nameerror[step.id] = "; ".join(
+                        str(e.get_error()[1]) for e in aeval.error
+                    )
+                    still_pending.append(step)
+                    continue
+                # Любая другая ошибка — реальная, поднимаем сразу.
+                msgs = "; ".join(str(e.get_error()[1]) for e in aeval.error)
+                raise CalcError(step.id, f"{step.formula!r} -> {msgs}")
 
             try:
                 value = float(value)
@@ -97,6 +131,17 @@ def run_calculation(spec: CalculationSpec) -> Dict[str, float]:
             aeval.symtable[step.id] = value
             step.value = value
             results[step.id] = value
+            made_progress = True
+
+        if not made_progress:
+            # Остались шаги с неразрешимыми переменными — реальная ошибка.
+            step = still_pending[0]
+            raise CalcError(
+                step.id,
+                f"{step.formula!r} -> {last_nameerror.get(step.id, 'неизвестная переменная')}",
+            )
+
+        pending = still_pending
 
     return results
 

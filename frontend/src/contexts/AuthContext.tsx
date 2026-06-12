@@ -27,6 +27,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => subscription.unsubscribe()
   }, [])
 
+  // Global 401 handler: any API call that returns 401 signs the user out.
+  // onAuthStateChange above clears `user`, and ProtectedRoute redirects to /login.
+  useEffect(() => {
+    const onUnauthorized = () => { supabase.auth.signOut() }
+    window.addEventListener('unauthorized', onUnauthorized)
+    return () => window.removeEventListener('unauthorized', onUnauthorized)
+  }, [])
+
   const login = async (email: string, password: string) => {
     const { error } = await supabase.auth.signInWithPassword({ email, password })
     if (error) throw new Error(error.message)
