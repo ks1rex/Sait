@@ -4,7 +4,7 @@ import {
   Users, Key, BarChart3, Shield, Coins, CheckCircle, XCircle,
   Copy, Check, TrendingDown, Loader2, RefreshCw,
 } from 'lucide-react'
-import { apiGet, apiPost, ApiError } from '../lib/api'
+import { apiGet, apiPost } from '../lib/api'
 import { useToast } from '../components/Toast'
 import { useTokens } from '../contexts/TokenContext'
 
