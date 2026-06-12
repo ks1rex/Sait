@@ -43,7 +43,7 @@ logger = logging.getLogger("app")
 app = FastAPI(
     title="GOST Calculator API",
     description="Backend для генерации расчётных работ по ГОСТ",
-    version="0.1.0",
+    version="0.1.1",
 )
 
 _cors_origins = [
