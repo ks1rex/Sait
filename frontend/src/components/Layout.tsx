@@ -21,7 +21,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen bg-navy text-slate-100 flex flex-col">
       <header className="bg-navy-light border-b border-slate-700 px-6 py-3 flex items-center gap-6">
         <Link to="/" className="flex items-center gap-2 font-bold text-accent text-lg shrink-0">
-          <img src="/logo-192.png" alt="" className="w-8 h-8 rounded-md object-cover" />
+          <img src={`${import.meta.env.BASE_URL}logo-192.png`} alt="" className="w-8 h-8 rounded-md object-cover" />
           ГОСТ Калькулятор
         </Link>
 
