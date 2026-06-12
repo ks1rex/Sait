@@ -1,4 +1,4 @@
-# Coursework GOST Calculator
+# GOST Calculator
 
 Веб-сервис для автоматического оформления студенческих расчётных работ по ГОСТ.
 
@@ -6,7 +6,9 @@
 спецификацию расчёта через DeepSeek API, выполняет вычисления и генерирует готовый
 `.docx` / `.pdf` отчёт.
 
-Подробная документация по архитектуре и roadmap: [CLAUDE.md](CLAUDE.md)
+**Продакшен:**
+- Frontend: https://ks1rex.github.io/Sait/
+- Backend API: https://sait-p07q.onrender.com
 
 ## Стек
 
@@ -18,11 +20,18 @@
 | PDF → текст | PyMuPDF |
 | Расчёты | asteval (безопасный вычислитель Python-выражений) |
 | Генерация документов | python-docx + LibreOffice headless (docx → pdf) |
-| Frontend | React + Vite + Tailwind (в разработке) |
+| Frontend | React + Vite + Tailwind |
 
-## Как запустить backend локально
+## Деплой
 
-### 1. Установить зависимости
+| Сервис | Платформа | Триггер |
+|--------|-----------|---------|
+| Frontend | GitHub Pages | пуш в `master` (папка `frontend/`) |
+| Backend | Render.com (Docker) | пуш в `master` (папка `backend/`) |
+
+## Локальный запуск
+
+### Backend
 
 ```bash
 cd backend
@@ -34,30 +43,15 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
-```
-
-### 2. Настроить переменные окружения
-
-```bash
 cp .env.example .env
-```
+# Заполнить .env: DEEPSEEK_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_JWT_SECRET
 
-Открыть `.env` и заполнить:
-- `DEEPSEEK_API_KEY` — ключ DeepSeek API
-- `SUPABASE_URL` — URL вашего проекта Supabase
-- `SUPABASE_SERVICE_ROLE_KEY` — service role key из настроек Supabase
-- `SUPABASE_JWT_SECRET` — JWT secret из настроек Supabase
-
-### 3. Запустить сервер
-
-```bash
 uvicorn app.main:app --reload
 ```
 
-Swagger UI: http://localhost:8000/docs  
-ReDoc: http://localhost:8000/redoc
+Swagger UI: http://localhost:8000/docs
 
-### Запуск через Docker
+### Backend через Docker
 
 ```bash
 cd backend
@@ -65,25 +59,44 @@ docker build -t gost-calc-backend .
 docker run -p 8000:8000 --env-file .env gost-calc-backend
 ```
 
+### Frontend
+
+```bash
+cd frontend
+npm install
+# Создать frontend/.env.local:
+# VITE_API_URL=http://localhost:8000
+
+npm run dev
+```
+
 ## Структура проекта
 
 ```
 /backend
   /app
-    main.py            — FastAPI приложение, роуты
-    ai_provider.py     — обёртка над DeepSeek/OpenAI
-    schemas.py         — Pydantic-модели (CalculationSpec и др.)
-    pdf_extract.py     — извлечение текста из PDF
-    calc_engine.py     — движок последовательных вычислений
-    docx_generator.py  — генерация отчёта по ГОСТ
-    supabase_client.py — клиент Supabase (service role)
+    main.py              — FastAPI приложение, роуты
+    ai_provider.py       — обёртка над DeepSeek/OpenAI
+    auth.py              — JWT-верификация, Supabase auth
+    admin.py             — роуты /admin/*
+    billing.py           — токены, списание, коды доступа
+    schemas.py           — Pydantic-модели (CalculationSpec и др.)
+    pdf_extract.py       — извлечение текста из PDF
+    calc_engine.py       — движок последовательных вычислений
+    docx_generator.py    — генерация отчёта по ГОСТ
+    supabase_client.py   — клиент Supabase (service role)
   requirements.txt
   Dockerfile
   .env.example
-/frontend              — React + Vite SPA (в разработке)
+/frontend                — React + Vite + Tailwind SPA
+  /src
+    /pages               — LoginPage, DashboardPage, NewProjectPage, AdminPage...
+    /contexts            — AuthContext, TokenContext
+    /components          — Layout, Toast, RedeemModal...
+  vercel.json
 /supabase
-  /migrations          — SQL миграции схемы БД
-/docs
-  calculation_spec_schema.json  — JSON Schema спецификации расчёта
-  extraction_prompt.md          — промпт для DeepSeek
+  /migrations            — SQL миграции схемы БД
+/.github/workflows
+  deploy-frontend.yml    — GitHub Actions: build + deploy to gh-pages
+render.yaml              — Render.com: Docker web service config
 ```
