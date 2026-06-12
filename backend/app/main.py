@@ -18,7 +18,7 @@ import fitz
 from dotenv import load_dotenv
 from docx import Document
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt as jose_jwt
@@ -287,14 +287,24 @@ async def list_templates(user: CurrentUser) -> List[TemplateInfo]:
         )
 
 
+_VALID_SUB_MODES = {"format_only", "minimal_edit", "chat"}
+
+
 @app.post("/upload", response_model=UploadResponse, tags=["projects"])
 async def upload_pdf(
-    task: Annotated[UploadFile, File(description="PDF: задание (обязательно)")],
+    task: Annotated[
+        Optional[UploadFile],
+        File(description="PDF: задание (для universal/fixed_template)"),
+    ] = None,
     methodology: Annotated[
         Optional[UploadFile], File(description="PDF: методичка (опционально)")
     ] = None,
     variant_data: Annotated[
         Optional[UploadFile], File(description="PDF или TXT: исходные данные по варианту (опционально)")
+    ] = None,
+    template: Annotated[
+        Optional[UploadFile],
+        File(description="docx или PDF: пользовательский шаблон (только для custom_template)"),
     ] = None,
     generation_mode: Annotated[
         str,
@@ -303,6 +313,10 @@ async def upload_pdf(
     template_id: Annotated[
         Optional[str],
         Form(description="ID шаблона из GET /templates (только для fixed_template)"),
+    ] = None,
+    sub_mode: Annotated[
+        Optional[str],
+        Form(description="Под-режим для custom_template: format_only | minimal_edit | chat"),
     ] = None,
     user: CurrentUser = None,
 ) -> UploadResponse:
@@ -353,6 +367,138 @@ async def upload_pdf(
                     )
                 },
             )
+
+    # ── custom_template ──────────────────────────────────────────────────────
+    if generation_mode == "custom_template":
+        effective_sub_mode = sub_mode or "format_only"
+        if effective_sub_mode not in _VALID_SUB_MODES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": f"Недопустимый sub_mode '{effective_sub_mode}'. Допустимые: {sorted(_VALID_SUB_MODES)}"},
+            )
+        if effective_sub_mode != "format_only":
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail={"error": f"sub_mode='{effective_sub_mode}' ещё не реализован. Используйте format_only."},
+            )
+        if not template or not template.filename:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "Для custom_template необходимо передать файл template (.docx или .pdf)"},
+            )
+
+        tpl_filename = template.filename or "template"
+        tpl_ext = os.path.splitext(tpl_filename)[1].lower()
+        tpl_is_pdf = tpl_ext == ".pdf" or template.content_type in _PDF_CONTENT_TYPES
+        tpl_is_docx = tpl_ext == ".docx" or template.content_type == _DOCX_CONTENT_TYPE
+        if not (tpl_is_pdf or tpl_is_docx):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "Шаблон должен быть файлом .docx или .pdf"},
+            )
+
+        tpl_bytes = await template.read()
+        if not tpl_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "Файл шаблона пустой"},
+            )
+
+        # Convert PDF → docx via LibreOffice if needed
+        docx_bytes: bytes
+        if tpl_is_pdf:
+            _validate_pdf_bytes(tpl_bytes, "Шаблон")
+            try:
+                with tempfile.TemporaryDirectory() as tmp_conv:
+                    pdf_tmp = os.path.join(tmp_conv, "input.pdf")
+                    with open(pdf_tmp, "wb") as f:
+                        f.write(tpl_bytes)
+                    subprocess.run(
+                        [_SOFFICE_BIN, "--headless", "--convert-to", "docx", "--outdir", tmp_conv, pdf_tmp],
+                        check=True, capture_output=True, timeout=_SOFFICE_TIMEOUT,
+                    )
+                    docx_tmp = os.path.join(tmp_conv, "input.docx")
+                    if not os.path.exists(docx_tmp):
+                        raise RuntimeError("LibreOffice не создал .docx")
+                    with open(docx_tmp, "rb") as f:
+                        docx_bytes = f.read()
+            except FileNotFoundError:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={"error": "LibreOffice (soffice) не установлен — не удалось конвертировать PDF в docx"},
+                )
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError) as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={"error": f"Ошибка конвертации PDF → docx: {exc}"},
+                )
+        else:
+            docx_bytes = tpl_bytes
+
+        ct_project_id = str(uuid.uuid4())
+        ct_user_id: str = user["user_id"]
+        ct_db = get_supabase()
+        ct_storage_path = f"{ct_user_id}/{ct_project_id}/template.docx"
+
+        try:
+            ct_db.storage.from_("uploads").upload(
+                path=ct_storage_path,
+                file=docx_bytes,
+                file_options={"content-type": _DOCX_CONTENT_TYPE},
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": f"Ошибка загрузки шаблона в хранилище: {exc}"},
+            )
+
+        ct_title = os.path.splitext(tpl_filename)[0]
+        try:
+            ct_db.table("projects").insert({
+                "id": ct_project_id,
+                "user_id": ct_user_id,
+                "title": ct_title,
+                "status": "uploaded",
+                "generation_mode": "custom_template",
+            }).execute()
+        except Exception as exc:
+            try:
+                ct_db.storage.from_("uploads").remove([ct_storage_path])
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": f"Ошибка создания проекта в БД: {exc}"},
+            )
+
+        try:
+            ct_db.table("custom_templates").insert({
+                "project_id": ct_project_id,
+                "source_storage_path": ct_storage_path,
+                "sub_mode": effective_sub_mode,
+            }).execute()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": f"Ошибка записи custom_templates: {exc}"},
+            )
+
+        return UploadResponse(
+            project_id=ct_project_id,
+            files=[UploadedFile(
+                file_type="template",
+                storage_path=ct_storage_path,
+                original_name=tpl_filename,
+            )],
+            task_text_length=0,
+        )
+
+    # ── universal / fixed_template ────────────────────────────────────────────
+    if not task or not task.filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": f"Для режима '{generation_mode}' необходимо передать файл task (PDF)"},
+        )
 
     if task.content_type not in _PDF_CONTENT_TYPES:
         raise HTTPException(
@@ -413,7 +559,6 @@ async def upload_pdf(
                 file_options={"content-type": content_type},
             )
         except Exception as exc:
-            # rollback already-uploaded files
             if storage_paths:
                 try:
                     db.storage.from_("uploads").remove(storage_paths)
@@ -475,7 +620,6 @@ async def upload_pdf(
             ]
         ).execute()
     except Exception as exc:
-        # project + files in storage already created — surface the error but don't rollback
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": f"Ошибка записи метаданных файлов: {exc}"},
@@ -616,19 +760,123 @@ async def extract_spec(
 
         return ExtractResponse(project_id=project_id, spec=spec)
 
-    # ── custom_template: not yet implemented ─────────────────────────────────
+    # ── custom_template ───────────────────────────────────────────────────────
     if generation_mode == "custom_template":
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail={
-                "status": "not_implemented_yet",
-                "generation_mode": generation_mode,
-                "message": (
-                    "Режим 'custom_template' будет реализован в следующих блоках. "
-                    "Используйте generation_mode='universal' или 'fixed_template'."
-                ),
-            },
+        ct_row = (
+            db.table("custom_templates")
+            .select("source_storage_path, sub_mode")
+            .eq("project_id", project_id)
+            .execute()
         )
+        if not ct_row.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Запись custom_templates не найдена для этого проекта"},
+            )
+        ct_info = ct_row.data[0]
+        ct_sub_mode: str = ct_info.get("sub_mode", "format_only")
+        ct_source_path: str = ct_info["source_storage_path"]
+
+        if ct_sub_mode != "format_only":
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail={"error": f"sub_mode='{ct_sub_mode}' ещё не реализован"},
+            )
+
+        # Download docx from Storage
+        try:
+            docx_bytes: bytes = db.storage.from_("uploads").download(ct_source_path)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": f"Не удалось скачать шаблон из хранилища: {exc}"},
+            )
+
+        # Apply GOST styles and remove TOC
+        try:
+            doc = Document(io.BytesIO(docx_bytes))
+            apply_gost_styles(doc)
+            remove_toc_section(doc)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error": f"Ошибка применения ГОСТ-стилей: {exc}"},
+            )
+
+        # Save formatted docx to temp dir and convert to PDF
+        with tempfile.TemporaryDirectory() as tmp_out:
+            out_docx = os.path.join(tmp_out, "report.docx")
+            doc.save(out_docx)
+            with open(out_docx, "rb") as f:
+                formatted_docx_bytes = f.read()
+
+            # Convert to PDF via LibreOffice
+            pdf_bytes: bytes | None = None
+            try:
+                subprocess.run(
+                    [_SOFFICE_BIN, "--headless", "--convert-to", "pdf", "--outdir", tmp_out, out_docx],
+                    check=True, capture_output=True, timeout=_SOFFICE_TIMEOUT,
+                )
+                out_pdf = os.path.join(tmp_out, "report.pdf")
+                if os.path.exists(out_pdf):
+                    with open(out_pdf, "rb") as f:
+                        pdf_bytes = f.read()
+            except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                pass  # PDF is optional; return docx only
+
+        # Upload to outputs bucket
+        out_docx_path = f"{user_id}/{project_id}/report.docx"
+        out_pdf_path = f"{user_id}/{project_id}/report.pdf"
+        try:
+            db.storage.from_("outputs").upload(
+                path=out_docx_path,
+                file=formatted_docx_bytes,
+                file_options={"content-type": _DOCX_CONTENT_TYPE},
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": f"Ошибка загрузки docx в хранилище outputs: {exc}"},
+            )
+
+        if pdf_bytes:
+            try:
+                db.storage.from_("outputs").upload(
+                    path=out_pdf_path,
+                    file=pdf_bytes,
+                    file_options={"content-type": "application/pdf"},
+                )
+            except Exception:
+                pass  # non-fatal
+
+        # Generate signed URLs
+        try:
+            docx_url = db.storage.from_("outputs").create_signed_url(out_docx_path, 3600)["signedURL"]
+        except Exception:
+            docx_url = ""
+        pdf_url: str | None = None
+        if pdf_bytes:
+            try:
+                pdf_url = db.storage.from_("outputs").create_signed_url(out_pdf_path, 3600)["signedURL"]
+            except Exception:
+                pass
+
+        # Update project
+        update_data: dict = {
+            "status": "done",
+            "output_docx_path": out_docx_path,
+        }
+        if pdf_bytes:
+            update_data["output_pdf_path"] = out_pdf_path
+        db.table("projects").update(update_data).eq("id", project_id).execute()
+
+        return JSONResponse(content={
+            "project_id": project_id,
+            "mode": "format_only",
+            "message": "Документ отформатирован по ГОСТ, доступен для скачивания",
+            "docx_url": docx_url,
+            "pdf_url": pdf_url,
+        })
 
     # 2. Load file records for this project
     files_result = (
@@ -762,15 +1010,31 @@ async def extract_spec(
     return ExtractResponse(project_id=project_id, spec=spec)
 
 
-@app.get("/spec/{project_id}", response_model=CalculationSpec, tags=["projects"])
-async def get_spec(project_id: str, user: CurrentUser) -> CalculationSpec:
+@app.get("/spec/{project_id}", tags=["projects"])
+async def get_spec(project_id: str, user: CurrentUser):
     """
     Возвращает сохранённую спецификацию расчёта для проекта.
-    Используется фронтендом для отображения экрана проверки/редактирования.
+    Для custom_template/format_only возвращает JSON с mode и message вместо CalculationSpec.
     """
-    _require_project(project_id, user["user_id"])
+    project = _require_project(project_id, user["user_id"])
+    generation_mode: str = project.get("generation_mode", "universal")
 
     db = get_supabase()
+
+    if generation_mode == "custom_template":
+        ct_row = (
+            db.table("custom_templates")
+            .select("sub_mode")
+            .eq("project_id", project_id)
+            .execute()
+        )
+        sub_mode = ct_row.data[0]["sub_mode"] if ct_row.data else "format_only"
+        if sub_mode == "format_only":
+            return JSONResponse(content={
+                "mode": "format_only",
+                "message": "Документ отформатирован по ГОСТ, доступен для скачивания",
+            })
+
     result = (
         db.table("calculation_specs")
         .select("spec_json")
