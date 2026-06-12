@@ -49,8 +49,10 @@ PROVIDER_CONFIG = {
 def _client() -> OpenAI:
     cfg = PROVIDER_CONFIG[AI_PROVIDER]
     api_key = os.environ[cfg["api_key_env"]]
-    # Pass trust_env=False httpx client to bypass system SOCKS proxy
-    http = httpx.Client(trust_env=False)
+    # trust_env=False bypasses the system SOCKS proxy that breaks httpx.
+    # Explicit timeout caps a hung provider call at ~3 min (well above the
+    # 30-60 s a normal extraction takes) instead of the SDK default of 10 min.
+    http = httpx.Client(trust_env=False, timeout=httpx.Timeout(180.0, connect=10.0))
     return OpenAI(api_key=api_key, base_url=cfg["base_url"], http_client=http)
 
 
