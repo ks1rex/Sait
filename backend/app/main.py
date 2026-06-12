@@ -31,7 +31,8 @@ from .docx_generator import generate_docx
 from .gost_styles import apply_gost_styles, remove_toc_section
 from .pdf_extract import extract_text_and_tables
 from .schemas import CalculationSpec
-from .supabase_client import get_supabase
+from .billing import InsufficientTokensError, consume_tokens, get_token_cost
+from .supabase_client import get_supabase, get_supabase_as_user
 
 load_dotenv()
 
@@ -48,6 +49,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+from fastapi import Request as _Request
+from fastapi.responses import JSONResponse as _JSONResponse
+
+@app.exception_handler(InsufficientTokensError)
+async def insufficient_tokens_handler(_req: _Request, exc: InsufficientTokensError):
+    return _JSONResponse(
+        status_code=402,
+        content={
+            "error": "insufficient_tokens",
+            "required": exc.required,
+            "balance": exc.balance,
+        },
+    )
 
 # ---------------------------------------------------------------------------
 # Auth
@@ -73,7 +88,11 @@ async def get_current_user(
             algorithms=["HS256"],
             audience="authenticated",
         )
-        return {"user_id": payload["sub"], "email": payload.get("email", "")}
+        return {
+            "user_id": payload["sub"],
+            "email": payload.get("email", ""),
+            "jwt": credentials.credentials,
+        }
     except JWTError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -163,6 +182,15 @@ class ChatResponse(BaseModel):
     reply: str
     docx_url: str
     pdf_url: Optional[str] = None
+
+
+class MeResponse(BaseModel):
+    token_balance: int
+    unlimited_access: bool
+
+
+class RedeemCodeRequest(BaseModel):
+    code: str
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +308,44 @@ def _validate_template_id(template_id: str) -> None:
 @app.get("/health", response_model=HealthResponse, tags=["system"])
 async def health() -> HealthResponse:
     return HealthResponse(status="ok", version=app.version)
+
+
+@app.get("/me", response_model=MeResponse, tags=["billing"])
+async def get_me(user: CurrentUser) -> MeResponse:
+    """Возвращает баланс токенов и флаг безлимитного доступа текущего пользователя."""
+    db = get_supabase()
+    result = (
+        db.table("profiles")
+        .select("token_balance, unlimited_access")
+        .eq("id", user["user_id"])
+        .single()
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail={"error": "Профиль не найден"})
+    return MeResponse(**result.data)
+
+
+@app.post("/redeem-code", tags=["billing"])
+async def redeem_code(body: RedeemCodeRequest, user: CurrentUser):
+    """Активирует код доступа, зачисляет токены на баланс."""
+    user_client = get_supabase_as_user(user["jwt"])
+    try:
+        result = user_client.rpc("redeem_code", {"p_code": body.code}).execute()
+    except Exception as exc:
+        msg = str(exc)
+        if "invalid_or_used_code" in msg:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Код не найден или уже использован"},
+            )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": f"Ошибка активации кода: {exc}"},
+        )
+    new_balance: int = result.data if isinstance(result.data, int) else 0
+    return {"token_balance": new_balance}
 
 
 @app.get("/templates", response_model=List[TemplateInfo], tags=["templates"])
@@ -720,6 +786,26 @@ async def extract_spec(
     # 1. Verify project ownership and load project row (contains generation_mode)
     project = _require_project(project_id, user_id)
     generation_mode: str = project.get("generation_mode", "universal")
+
+    # 1b. Determine sub_mode for billing (custom_template only)
+    _extract_sub_mode: str | None = None
+    if generation_mode == "custom_template":
+        _ct_meta = (
+            db.table("custom_templates")
+            .select("sub_mode")
+            .eq("project_id", project_id)
+            .execute()
+        )
+        _extract_sub_mode = (_ct_meta.data[0]["sub_mode"] if _ct_meta.data else None)
+
+    # 1c. Consume tokens BEFORE any AI/processing work
+    _cost = get_token_cost(generation_mode, _extract_sub_mode)
+    consume_tokens(
+        get_supabase_as_user(user["jwt"]),
+        amount=_cost,
+        reason=f"extract:{generation_mode}" + (f":{_extract_sub_mode}" if _extract_sub_mode else ""),
+        project_id=project_id,
+    )
 
     # ── fixed_template ───────────────────────────────────────────────────────
     if generation_mode == "fixed_template":
@@ -1377,7 +1463,15 @@ async def chat_turn(
     history: list[dict] = hist_result.data or []
     is_first_turn = not history
 
-    # 4. Save user message to DB BEFORE calling AI (so retry is safe)
+    # 4. Consume tokens BEFORE saving message (insufficient → 402, nothing written)
+    consume_tokens(
+        get_supabase_as_user(user["jwt"]),
+        amount=get_token_cost("custom_template", "chat"),
+        reason="chat_turn",
+        project_id=project_id,
+    )
+
+    # 5. Save user message to DB BEFORE calling AI (so retry is safe)
     try:
         db.table("chat_messages").insert({
             "project_id": project_id,
@@ -1849,7 +1943,7 @@ async def format_gost(
         bool,
         Query(description="Сохранить раздел 'Содержание' (true) или удалить (false)"),
     ] = True,
-    user: CurrentUser = None,
+    user: CurrentUser = None,  # type: ignore[assignment]  # FastAPI Depends overrides default
 ) -> Response:
     """
     Применяет ГОСТ-стили (поля, шрифты, межстрочный интервал, стили ячеек таблиц)
@@ -1872,6 +1966,14 @@ async def format_gost(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Поддерживаются только файлы .docx"},
+        )
+
+    # Consume tokens BEFORE processing — if insufficient, return 402 immediately
+    if user:
+        consume_tokens(
+            get_supabase_as_user(user["jwt"]),
+            amount=get_token_cost("format_gost"),
+            reason="format_gost",
         )
 
     file_bytes = await file.read()

@@ -22,3 +22,18 @@ def get_supabase() -> Client:
         http = httpx.Client(trust_env=False, http2=True)
         _client = create_client(url, key, options=ClientOptions(httpx_client=http))
     return _client
+
+
+def get_supabase_as_user(jwt: str) -> Client:
+    """
+    Return a Supabase client whose PostgREST calls are authenticated with
+    the given user JWT.  auth.uid() resolves correctly inside SECURITY DEFINER
+    RPCs because PostgREST sets the JWT claims on the DB session.
+    """
+    url = os.environ["SUPABASE_URL"]
+    key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    http = httpx.Client(trust_env=False, http2=True)
+    client = create_client(url, key, options=ClientOptions(httpx_client=http))
+    # Override PostgREST Authorization header so auth.uid() works in RPCs
+    client.postgrest.auth(jwt)
+    return client

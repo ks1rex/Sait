@@ -40,6 +40,20 @@ export interface CalculationSpec {
   references: string[]
 }
 
+export interface TemplateInfo {
+  id: string
+  title: string
+  discipline: string
+  work_type: string
+}
+
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  created_at: string
+}
+
 export interface Project {
   id: string
   title: string

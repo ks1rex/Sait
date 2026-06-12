@@ -9,6 +9,7 @@ import { NewProjectPage } from './pages/NewProjectPage'
 import { ReviewPage } from './pages/ReviewPage'
 import { ResultPage } from './pages/ResultPage'
 import { FormatGostPage } from './pages/FormatGostPage'
+import { ChatPage } from './pages/ChatPage'
 
 function AppRoutes() {
   return (
@@ -44,6 +45,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <Layout><ResultPage /></Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/project/:id/chat"
+        element={
+          <ProtectedRoute>
+            <Layout><ChatPage /></Layout>
           </ProtectedRoute>
         }
       />
