@@ -3,6 +3,17 @@
 .env.local
 .env.*.local
 
+# Logs
+*.log
+
+# Generated test/output artifacts
+test_output/
+backend/acceptance_out/
+
+# Supabase CLI local state
+supabase/.temp/
+frontend/supabase/
+
 # Python
 __pycache__/
 *.py[cod]

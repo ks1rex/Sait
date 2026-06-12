@@ -7,6 +7,7 @@ from __future__ import annotations
 import copy
 import io
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -36,16 +37,31 @@ from . import admin as admin_module
 
 load_dotenv()
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("app")
+
 app = FastAPI(
     title="GOST Calculator API",
     description="Backend для генерации расчётных работ по ГОСТ",
     version="0.1.0",
 )
 
+_cors_origins = [
+    o.strip()
+    for o in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000").split(",")
+    if o.strip()
+]
+if "*" in _cors_origins:
+    logger.warning(
+        "CORS_ORIGINS='*' — все источники разрешены. "
+        "В продакшене укажите конкретные домены фронтенда."
+    )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    # The wildcard origin is incompatible with credentials per the CORS spec
+    allow_credentials="*" not in _cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

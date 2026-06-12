@@ -56,13 +56,18 @@ def _client() -> OpenAI:
 
 # --- Промпты ----------------------------------------------------------------
 
-PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "docs"
+# backend/prompts — основное расположение (попадает в Docker-образ);
+# docs/ в корне репозитория — легаси-путь для старых чекаутов.
+_PROMPT_CANDIDATES = [
+    Path(__file__).resolve().parent.parent / "prompts" / "extraction_system_prompt.txt",
+    Path(__file__).resolve().parent.parent.parent / "docs" / "extraction_system_prompt.txt",
+]
 
 
 def _load_system_prompt() -> str:
-    prompt_file = PROMPTS_DIR / "extraction_system_prompt.txt"
-    if prompt_file.exists():
-        return prompt_file.read_text(encoding="utf-8")
+    for prompt_file in _PROMPT_CANDIDATES:
+        if prompt_file.exists():
+            return prompt_file.read_text(encoding="utf-8")
     return EXTRACTION_SYSTEM_PROMPT_FALLBACK
 
 
