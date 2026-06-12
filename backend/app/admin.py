@@ -4,7 +4,7 @@ from __future__ import annotations
 import random
 import string
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, List, Optional
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field

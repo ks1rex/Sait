@@ -18,13 +18,13 @@ from typing import Annotated, Dict, List, Optional
 import fitz
 from dotenv import load_dotenv
 from docx import Document
-from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError
 
 from .ai_provider import AI_PROVIDER, chat_completion, extract_calculation_spec, extract_variant_inputs, generate_conclusion, minimal_edit_rewrite
-from .auth import get_current_user, CurrentUser
+from .auth import CurrentUser
 from .calc_engine import CalcError, render_text_template, run_calculation
 from .docx_md_converter import docx_to_markdown, markdown_to_docx
 from .docx_generator import generate_docx

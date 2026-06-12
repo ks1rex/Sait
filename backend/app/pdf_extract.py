@@ -14,15 +14,6 @@ from __future__ import annotations
 import fitz  # PyMuPDF
 
 
-def extract_text_from_pdf(file_path: str) -> str:
-    doc = fitz.open(file_path)
-    pages_text = []
-    for page in doc:
-        pages_text.append(page.get_text("text"))
-    doc.close()
-    return "\n\n".join(pages_text)
-
-
 def extract_text_and_tables(file_path: str) -> str:
     """
     Более аккуратное извлечение: текст + таблицы (как markdown) отдельно
