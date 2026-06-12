@@ -90,6 +90,17 @@ export function ReviewPage() {
 
   if (loading) return <div className="flex justify-center py-20 text-slate-400">Загрузка спецификации...</div>
   if (!spec) return <div className="text-center py-20 text-slate-500">Спецификация не найдена</div>
+  // Defensive: a custom_template project has no editable spec — don't crash here.
+  if (!Array.isArray(spec.input_data) || !Array.isArray(spec.sections)) {
+    return (
+      <div className="text-center py-20 text-slate-500">
+        Для этого проекта нет редактируемой спецификации.{' '}
+        <button onClick={() => navigate(`/project/${id}/result`)} className="text-accent hover:underline">
+          Открыть результат
+        </button>
+      </div>
+    )
+  }
 
   return (
     <div className="max-w-4xl mx-auto">

@@ -24,6 +24,13 @@ export function DashboardPage() {
   }, [toast])
 
   const projectUrl = (p: Project) => {
+    // custom_template projects have no editable spec (format/minimal_edit produce
+    // a ready document; chat is interactive) — the result page handles both,
+    // routing chat drafts onward. Never send them to the spec-editing /review.
+    if (p.generation_mode === 'custom_template') {
+      if (p.status === 'uploaded') return null
+      return `/project/${p.id}/result`
+    }
     if (p.status === 'done') return `/project/${p.id}/result`
     if (p.status === 'extracted' || p.status === 'computed') return `/project/${p.id}/review`
     return null

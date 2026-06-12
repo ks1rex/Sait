@@ -1,9 +1,18 @@
 import { useEffect, useState } from 'react'
-import { useParams } from 'react-router-dom'
-import { Download, FileText, Loader2 } from 'lucide-react'
+import { useParams, Link } from 'react-router-dom'
+import { Download, FileText, Loader2, MessageSquare } from 'lucide-react'
 import { apiGet, apiPost } from '../lib/api'
 import { useToast } from '../components/Toast'
 import type { CalculationSpec } from '../types'
+
+// /spec returns either a full CalculationSpec (universal/fixed_template) or,
+// for custom_template, a lightweight {mode, message} object with no sections.
+interface CustomSpecInfo { mode: string; message: string }
+type SpecResponse = CalculationSpec | CustomSpecInfo
+
+function isCalculationSpec(s: SpecResponse): s is CalculationSpec {
+  return Array.isArray((s as CalculationSpec).sections)
+}
 
 interface ProjectMeta {
   output_docx_url: string | null
@@ -21,14 +30,14 @@ export function ResultPage() {
   const { id } = useParams<{ id: string }>()
   const toast = useToast()
 
-  const [spec, setSpec] = useState<CalculationSpec | null>(null)
+  const [spec, setSpec] = useState<SpecResponse | null>(null)
   const [meta, setMeta] = useState<ProjectMeta | null>(null)
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
 
   useEffect(() => {
     Promise.all([
-      apiGet<CalculationSpec>(`/spec/${id}`),
+      apiGet<SpecResponse>(`/spec/${id}`),
       apiGet<ProjectMeta>(`/project/${id}`),
     ])
       .then(([s, m]) => { setSpec(s); setMeta(m) })
@@ -56,6 +65,45 @@ export function ResultPage() {
 
   if (loading) return <div className="flex justify-center py-20 text-slate-400">Загрузка результатов...</div>
   if (!spec) return <div className="text-center py-20 text-slate-500">Результаты не найдены</div>
+
+  // custom_template: no calculation steps — show the ready document / chat link.
+  if (!isCalculationSpec(spec)) {
+    const isChat = spec.mode === 'chat'
+    return (
+      <div className="max-w-xl mx-auto">
+        <h1 className="text-xl font-bold text-slate-100 mb-2">Документ готов</h1>
+        <p className="text-sm text-slate-400 mb-6">{spec.message}</p>
+
+        <div className="flex flex-wrap gap-2">
+          {meta?.output_docx_url && (
+            <a href={meta.output_docx_url} target="_blank" rel="noreferrer"
+              className="flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-600 text-sm text-slate-300
+                hover:border-accent/60 hover:text-slate-100 transition-colors">
+              <Download size={14} /> DOCX
+            </a>
+          )}
+          {meta?.output_pdf_url && (
+            <a href={meta.output_pdf_url} target="_blank" rel="noreferrer"
+              className="flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-600 text-sm text-slate-300
+                hover:border-accent/60 hover:text-slate-100 transition-colors">
+              <Download size={14} /> PDF
+            </a>
+          )}
+          {isChat && (
+            <Link to={`/project/${id}/chat`}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-accent hover:bg-accent-dark text-white text-sm
+                font-medium transition-colors">
+              <MessageSquare size={14} /> Открыть чат
+            </Link>
+          )}
+        </div>
+
+        {!meta?.output_docx_url && !isChat && (
+          <p className="text-sm text-slate-500 mt-6">Файл ещё формируется. Обновите страницу через минуту.</p>
+        )}
+      </div>
+    )
+  }
 
   const allSteps = spec.sections.flatMap(s => s.steps)
   const computed = allSteps.filter(st => st.value !== null && st.value !== undefined)

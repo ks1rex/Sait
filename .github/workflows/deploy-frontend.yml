@@ -17,14 +17,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Debug – show commit and problematic lines
-        run: |
-          git log --oneline -3
-          echo "=== api.ts lines 10-18 ==="
-          sed -n '10,18p' frontend/src/lib/api.ts
-          echo "=== AdminPage.tsx line 7 ==="
-          sed -n '7p' frontend/src/pages/AdminPage.tsx
-
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
