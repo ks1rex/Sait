@@ -58,26 +58,38 @@ def _fmt_number(value: float, rounding: int) -> str:
     return s.replace('.', ',')
 
 
-def _substitute_values(formula: str, namespace: dict, rounding: int = 3) -> str:
+def _substitute_values(formula: str, formatted: dict[str, str]) -> str:
     """
-    Replace each variable name in *formula* with its formatted numeric value
-    from *namespace*.  Python keywords and math-function names are left as-is.
-    Supports both Latin and Cyrillic identifiers (used in Russian engineering).
+    Replace each variable name in *formula* with its pre-formatted string from
+    *formatted*.  Python keywords and math-function names are left as-is.
+    Supports both Latin and Cyrillic identifiers.
+
+    Each caller pre-builds *formatted* with per-variable precision so that
+    input_data values use their natural decimal places (not the current step's
+    rounding), and step results use their own step.rounding.
     """
     def _repl(m: re.Match) -> str:
         name = m.group(0)
         if name in _FORMULA_SKIP:
             return name
-        val = namespace.get(name)
-        if val is not None:
-            return _fmt_number(float(val), rounding)
-        return name
+        return formatted.get(name, name)
 
     return re.sub(
         r'\b[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*\b',
         _repl,
         formula,
     )
+
+
+def _natural_decimals(value) -> int:
+    """Return the number of non-zero decimal digits of a numeric value."""
+    if isinstance(value, int):
+        return 0
+    s = str(float(value))
+    if '.' in s:
+        frac = s.split('.')[1].rstrip('0')
+        return len(frac) if frac else 0
+    return 0
 
 
 def _remove_table_borders(table) -> None:
@@ -223,20 +235,21 @@ def _add_formula_row(
     doc: Document,
     step,
     formula_counter: int,
-    namespace: dict,
+    formatted: dict[str, str],
 ) -> None:
     """
     Render the formula line:
         <tab> Symbol = formula = substituted = result unit <tab> (N)
     Uses a centre tab stop at 8.5 cm and a right tab stop at 17 cm,
     so the formula body is centred and the serial number is at the right margin.
+    *formatted* maps var_id -> pre-formatted string (each with its own precision).
     """
     value_str = (
         _fmt_number(step.value, step.rounding)
         if step.value is not None
         else '?'
     )
-    subst = _substitute_values(step.formula, namespace, step.rounding)
+    subst = _substitute_values(step.formula, formatted)
     unit = f' {step.unit}'.rstrip()
     formula_line = (
         f'{step.result_symbol} = {step.formula} = {subst} = {value_str}{unit}'
@@ -268,11 +281,16 @@ def _add_formula_row(
 def _add_sections(doc: Document, spec: CalculationSpec) -> None:
     formula_counter = 0
 
-    # Accumulate namespace like calc_engine so _substitute_values gets values
-    namespace: dict[str, float] = {}
+    # Pre-build formatted dict: input_data uses natural decimal precision,
+    # step results will be added incrementally using their own step.rounding.
+    # This prevents input_data values from being rounded to the current step's
+    # precision (e.g. T_hl=0.5 showing as "0" when step.rounding=0).
+    formatted: dict[str, str] = {}
     for item in spec.input_data:
         try:
-            namespace[item.id] = float(item.value)
+            val = float(item.value)
+            decimals = _natural_decimals(item.value)
+            formatted[item.id] = _fmt_number(val, decimals)
         except (TypeError, ValueError):
             pass
 
@@ -295,16 +313,16 @@ def _add_sections(doc: Document, spec: CalculationSpec) -> None:
             p1.paragraph_format.first_line_indent = Cm(0)
 
             # Абзац 2: строка формулы с табстопами
-            _add_formula_row(doc, step, formula_counter, namespace)
+            _add_formula_row(doc, step, formula_counter, formatted)
 
             # Абзац 3: пояснение «где ...» (если есть)
             if step.explanation:
                 p3 = doc.add_paragraph(f'где {step.explanation}')
                 p3.paragraph_format.first_line_indent = Cm(0)
 
-            # Accumulate computed value so later steps can reference it
+            # Add step result to formatted with its own rounding
             if step.value is not None:
-                namespace[step.id] = step.value
+                formatted[step.id] = _fmt_number(step.value, step.rounding)
 
 
 def _add_graphics_placeholder(doc: Document) -> None:

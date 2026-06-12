@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 from typing import NamedTuple
 
+import httpx
 from openai import OpenAI
 
 # --- Конфигурация провайдера ---------------------------------------------
@@ -48,7 +49,9 @@ PROVIDER_CONFIG = {
 def _client() -> OpenAI:
     cfg = PROVIDER_CONFIG[AI_PROVIDER]
     api_key = os.environ[cfg["api_key_env"]]
-    return OpenAI(api_key=api_key, base_url=cfg["base_url"])
+    # Pass trust_env=False httpx client to bypass system SOCKS proxy
+    http = httpx.Client(trust_env=False)
+    return OpenAI(api_key=api_key, base_url=cfg["base_url"], http_client=http)
 
 
 # --- Промпты ----------------------------------------------------------------

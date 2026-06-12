@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import os
 
-from supabase import create_client, Client
+import httpx
+from supabase import create_client, Client, ClientOptions
 
 _client: Client | None = None
 
@@ -17,5 +18,7 @@ def get_supabase() -> Client:
     if _client is None:
         url = os.environ["SUPABASE_URL"]
         key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-        _client = create_client(url, key)
+        # Bypass system SOCKS proxy (Windows registry) that breaks httpx
+        http = httpx.Client(trust_env=False, http2=True)
+        _client = create_client(url, key, options=ClientOptions(httpx_client=http))
     return _client
