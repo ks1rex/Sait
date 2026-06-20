@@ -34,6 +34,7 @@ from .schemas import CalculationSpec
 from .billing import InsufficientTokensError, consume_tokens, get_token_cost
 from .supabase_client import get_supabase, get_supabase_as_user
 from . import admin as admin_module
+from . import admin_templates as admin_templates_module
 
 load_dotenv()
 
@@ -67,6 +68,7 @@ app.add_middleware(
 )
 
 app.include_router(admin_module.router)
+app.include_router(admin_templates_module.router)
 
 from fastapi import Request as _Request
 from fastapi.responses import JSONResponse as _JSONResponse
@@ -304,6 +306,28 @@ def _validate_template_id(template_id: str) -> None:
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error": f"Файл спецификации для шаблона '{template_id}' не найден на сервере"},
         )
+
+
+async def get_template_spec(template_id: str) -> dict:
+    """Admin override in Supabase takes priority over the file on disk."""
+    db = get_supabase()
+    try:
+        result = (
+            db.table("gost_template_overrides")
+            .select("spec")
+            .eq("template_id", template_id)
+            .single()
+            .execute()
+        )
+        if result.data:
+            return result.data["spec"]
+    except Exception:
+        pass  # no override row — fall back to file
+
+    spec_path = _TEMPLATES_DIR / "specs" / f"{template_id}.json"
+    if not spec_path.exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"error": "Template not found"})
+    return json.loads(spec_path.read_text(encoding="utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -826,13 +850,7 @@ async def extract_spec(
                 detail={"error": "Проект не имеет template_id для режима fixed_template"},
             )
 
-        spec_path = _TEMPLATES_DIR / "specs" / f"{template_id}.json"
-        if not spec_path.exists():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={"error": f"Файл спецификации для шаблона '{template_id}' не найден"},
-            )
-        spec_dict = copy.deepcopy(json.loads(spec_path.read_text(encoding="utf-8")))
+        spec_dict = copy.deepcopy(await get_template_spec(template_id))
 
         files_result = (
             db.table("project_files")

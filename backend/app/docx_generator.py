@@ -196,8 +196,6 @@ def _add_toc(doc: Document) -> None:
     hint.paragraph_format.first_line_indent = Cm(0)
     hint.runs[0].italic = True
 
-    doc.add_page_break()
-
 
 def _add_intro(doc: Document, spec: CalculationSpec) -> None:
     doc.add_heading('Введение', level=1)
@@ -205,7 +203,6 @@ def _add_intro(doc: Document, spec: CalculationSpec) -> None:
     for block in text.split('\n\n'):
         if block.strip():
             doc.add_paragraph(block.strip())
-    doc.add_page_break()
 
 
 def _add_input_data_table(doc: Document, spec: CalculationSpec) -> None:
@@ -236,8 +233,6 @@ def _add_input_data_table(doc: Document, spec: CalculationSpec) -> None:
         for cell in row:
             apply_table_cell_style(cell)
 
-    doc.add_page_break()
-
 
 def _add_formula_row(
     doc: Document,
@@ -264,7 +259,13 @@ def _add_formula_row(
     )
 
     p = doc.add_paragraph()
+    # Explicit LEFT alignment: formula paragraphs inherit Normal's JUSTIFY,
+    # which fights the manual tab stops below and breaks rendering in some
+    # converters (e.g. LibreOffice --convert-to pdf drops/garbles the line).
+    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
     p.paragraph_format.first_line_indent = Cm(0)
+    p.paragraph_format.space_before = Pt(14)
+    p.paragraph_format.space_after = Pt(14)
 
     # Inject tab stops into paragraph XML
     pPr = p._p.get_or_add_pPr()
@@ -283,7 +284,8 @@ def _add_formula_row(
     pPr.append(tabs_elem)
 
     # \t → jump to centre tab; second \t → jump to right tab for number
-    p.add_run(f'\t{formula_line}\t({formula_counter})')
+    run = p.add_run(f'\t{formula_line}\t({formula_counter})')
+    run.italic = True
 
 
 def _add_sections(doc: Document, spec: CalculationSpec) -> None:
@@ -334,7 +336,6 @@ def _add_sections(doc: Document, spec: CalculationSpec) -> None:
 
 
 def _add_graphics_placeholder(doc: Document) -> None:
-    doc.add_page_break()
     doc.add_heading('Графическая часть', level=1)
     p = doc.add_paragraph(
         '[Графическая часть формируется отдельно — '
@@ -366,6 +367,22 @@ def _add_references(doc: Document, spec: CalculationSpec) -> None:
         p.runs[0].italic = True
 
 
+def _add_chapter_page_breaks(doc: Document) -> None:
+    """Insert a page break before every Heading 1 except the first (title-page
+    break already precedes it)."""
+    seen_first = False
+    for p in doc.paragraphs:
+        if p.style.name != 'Heading 1':
+            continue
+        if not seen_first:
+            seen_first = True
+            continue
+        pPr = p._p.get_or_add_pPr()
+        pageBreak = OxmlElement('w:pageBreakBefore')
+        pageBreak.set(qn('w:val'), '1')
+        pPr.append(pageBreak)
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -395,6 +412,8 @@ def generate_docx(spec: CalculationSpec, meta: dict, output_path: str) -> str:
     _add_graphics_placeholder(doc)
     _add_conclusion(doc, spec)
     _add_references(doc, spec)
+
+    _add_chapter_page_breaks(doc)
 
     doc.save(output_path)
     return output_path

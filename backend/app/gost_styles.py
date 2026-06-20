@@ -51,7 +51,7 @@ def _set_font_all_scripts(style, font_name: str) -> None:
         rFonts.set(qn(attr), font_name)
 
 
-def _setup_heading_style(style) -> None:
+def _setup_heading_style(style, alignment) -> None:
     _set_font_all_scripts(style, GOST_FONT)
     style.font.size = GOST_BODY_PT
     style.font.bold = True
@@ -59,8 +59,9 @@ def _setup_heading_style(style) -> None:
     style.font.color.rgb = RGBColor(0, 0, 0)
 
     pf = style.paragraph_format
-    pf.left_indent = Cm(1.25)
-    pf.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    pf.left_indent = Cm(0)
+    pf.first_line_indent = Cm(0)
+    pf.alignment = alignment
     pf.line_spacing = 1.5
     pf.space_before = Pt(14)
     pf.space_after = Pt(14)
@@ -96,8 +97,8 @@ def apply_gost_page_setup(doc: Document) -> None:
 def apply_gost_paragraph_styles(doc: Document) -> None:
     """Configure Normal, Heading 1 and Heading 2 styles to GOST spec."""
     _setup_normal_style(doc)
-    _setup_heading_style(doc.styles['Heading 1'])
-    _setup_heading_style(doc.styles['Heading 2'])
+    _setup_heading_style(doc.styles['Heading 1'], WD_ALIGN_PARAGRAPH.CENTER)
+    _setup_heading_style(doc.styles['Heading 2'], WD_ALIGN_PARAGRAPH.LEFT)
 
 
 def apply_table_cell_style(cell) -> None:
