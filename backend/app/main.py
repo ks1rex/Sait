@@ -11,14 +11,16 @@ import logging
 import os
 import subprocess
 import tempfile
+import time
 import uuid
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Annotated, Dict, List, Optional
 
 import fitz
 from dotenv import load_dotenv
 from docx import Document
-from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError
@@ -66,6 +68,43 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Rate limiting ───────────────────────────────────────────────────────────
+# ponytail: in-memory fixed-window limiter, per-process. Sufficient for a
+# single uvicorn worker (Render default); switch to Redis/slowapi if scaled to
+# multiple workers. slowapi was the first choice but can't be installed in this
+# environment (system SOCKS proxy blocks pip), and this is ~20 lines anyway.
+_RL_WINDOW = 60  # seconds
+_RL_DEFAULT = int(os.getenv("RATE_LIMIT_PER_MIN", "120"))
+# Stricter caps for brute-force / abuse-sensitive endpoints (own bucket per IP).
+_RL_STRICT = {"/redeem-code": 10}
+_rl_hits: dict[tuple[str, str], deque] = defaultdict(deque)
+
+
+@app.middleware("http")
+async def rate_limit(request: Request, call_next):
+    if request.method == "OPTIONS":  # don't throttle CORS preflight
+        return await call_next(request)
+    ip = request.client.host if request.client else "unknown"
+    path = request.url.path
+    limit = _RL_STRICT.get(path, _RL_DEFAULT)
+    key = (ip, path if path in _RL_STRICT else "*")
+    now = time.monotonic()
+
+    if len(_rl_hits) > 50_000:  # crude memory bound — resets all windows
+        _rl_hits.clear()
+
+    dq = _rl_hits[key]
+    while dq and dq[0] <= now - _RL_WINDOW:
+        dq.popleft()
+    if len(dq) >= limit:
+        return JSONResponse(
+            status_code=429,
+            content={"error": "Слишком много запросов. Попробуйте позже."},
+        )
+    dq.append(now)
+    return await call_next(request)
+
 
 app.include_router(admin_module.router)
 app.include_router(admin_templates_module.router)
