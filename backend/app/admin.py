@@ -1,7 +1,7 @@
 """Admin-only router. All endpoints require is_admin=True in profiles."""
 from __future__ import annotations
 
-import random
+import secrets
 import string
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
@@ -158,9 +158,11 @@ async def set_flag(user_id: str, body: SetFlagRequest, admin: AdminUser):
 @router.post("/codes/generate")
 async def generate_codes(body: GenerateCodesRequest, admin: AdminUser):
     """Generate N codes with given token value and optional prefix."""
+    # Codes are worth tokens (money) — use a CSPRNG, not the predictable
+    # Mersenne-Twister `random`, so codes can't be guessed from prior output.
     chars = string.ascii_uppercase + string.digits
     codes = [
-        f"{body.prefix}-{''.join(random.choices(chars, k=8))}"
+        f"{body.prefix}-{''.join(secrets.choice(chars) for _ in range(8))}"
         for _ in range(body.count)
     ]
 

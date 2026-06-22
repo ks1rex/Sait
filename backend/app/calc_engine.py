@@ -14,9 +14,15 @@ from __future__ import annotations
 from typing import Dict
 
 from asteval import Interpreter
-from jinja2 import Template
+from jinja2.sandbox import SandboxedEnvironment
 
 from .schemas import CalculationSpec
+
+# Text templates (intro/conclusion) can be edited by end users via PUT /spec,
+# so they are untrusted. A raw jinja2.Template would allow SSTI → RCE
+# (e.g. {{ cycler.__init__.__globals__ ... }}). SandboxedEnvironment blocks
+# access to dunders / unsafe attributes while still supporting {{ var }}.
+_sandbox = SandboxedEnvironment(autoescape=False)
 
 
 class CalcError(Exception):
@@ -177,4 +183,4 @@ def render_text_template(
         for var_id, value in results.items()
     }
 
-    return Template(template_str).render(**context)
+    return _sandbox.from_string(template_str).render(**context)
