@@ -9,6 +9,7 @@ import io
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -312,7 +313,7 @@ def _download_and_extract(storage_path: str) -> str:
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": f"Не удалось скачать файл {storage_path}: {exc}"},
+            detail={"error": f"Не удалось скачать файл {storage_path}"},
         )
     ext = storage_path.rsplit(".", 1)[-1].lower() if "." in storage_path else ""
     content_type = "text/plain" if ext == "txt" else "application/pdf"
@@ -331,7 +332,7 @@ def _validate_template_id(template_id: str) -> None:
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": f"Не удалось прочитать список шаблонов: {exc}"},
+            detail={"error": f"Не удалось прочитать список шаблонов"},
         )
     entry = next((item for item in manifest if item.get("id") == template_id), None)
     if entry is None:
@@ -349,6 +350,12 @@ def _validate_template_id(template_id: str) -> None:
 
 async def get_template_spec(template_id: str) -> dict:
     """Admin override in Supabase takes priority over the file on disk."""
+    # Defense in depth: template_id is interpolated into a file path below.
+    # Callers validate it against the manifest, but reject path-traversal /
+    # separators here too so this is safe even if a future caller forgets.
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", template_id or ""):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"error": "Template not found"})
+
     db = get_supabase()
     try:
         result = (
@@ -415,7 +422,7 @@ async def redeem_code(body: RedeemCodeRequest, user: CurrentUser):
             )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": f"Ошибка активации кода: {exc}"},
+            detail={"error": f"Ошибка активации кода"},
         )
     new_balance: int = result.data if isinstance(result.data, int) else 0
     return {"token_balance": new_balance}
@@ -440,7 +447,7 @@ async def list_templates(user: CurrentUser) -> List[TemplateInfo]:
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": f"Не удалось прочитать список шаблонов: {exc}"},
+            detail={"error": f"Не удалось прочитать список шаблонов"},
         )
 
 
@@ -590,7 +597,7 @@ async def upload_pdf(
                 except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError) as exc:
                     raise HTTPException(
                         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        detail={"error": f"Ошибка конвертации PDF → docx: {exc}"},
+                        detail={"error": f"Ошибка конвертации PDF → docx"},
                     )
             else:
                 ct_docx_bytes = tpl_bytes
@@ -624,7 +631,7 @@ async def upload_pdf(
             except Exception as exc:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail={"error": f"Ошибка загрузки шаблона в хранилище: {exc}"},
+                    detail={"error": f"Ошибка загрузки шаблона в хранилище"},
                 )
 
         ct_task_storage_path: str | None = None
@@ -647,7 +654,7 @@ async def upload_pdf(
                         pass
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail={"error": f"Ошибка загрузки задания в хранилище: {exc}"},
+                    detail={"error": f"Ошибка загрузки задания в хранилище"},
                 )
 
         ct_title = os.path.splitext(tpl_filename)[0] if tpl_filename else "Новый документ"
@@ -668,7 +675,7 @@ async def upload_pdf(
                     pass
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={"error": f"Ошибка создания проекта в БД: {exc}"},
+                detail={"error": f"Ошибка создания проекта в БД"},
             )
 
         ct_record: dict = {"project_id": ct_project_id, "sub_mode": effective_sub_mode}
@@ -681,7 +688,7 @@ async def upload_pdf(
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={"error": f"Ошибка записи custom_templates: {exc}"},
+                detail={"error": f"Ошибка записи custom_templates"},
             )
 
         uploaded_files = []
@@ -777,7 +784,7 @@ async def upload_pdf(
                     pass
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={"error": f"Ошибка загрузки файла {file_type} в хранилище: {exc}"},
+                detail={"error": f"Ошибка загрузки файла {file_type} в хранилище"},
             )
         storage_paths.append(path)
         return UploadedFile(file_type=file_type, storage_path=path, original_name=original_name)
@@ -814,7 +821,7 @@ async def upload_pdf(
             pass
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": f"Ошибка создания проекта в БД: {exc}"},
+            detail={"error": f"Ошибка создания проекта в БД"},
         )
 
     # Create project_files records
@@ -833,7 +840,7 @@ async def upload_pdf(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": f"Ошибка записи метаданных файлов: {exc}"},
+            detail={"error": f"Ошибка записи метаданных файлов"},
         )
 
     return UploadResponse(
@@ -933,12 +940,12 @@ async def extract_spec(
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail={"error": f"AI вернул некорректный JSON: {exc}"},
+                detail={"error": f"AI вернул некорректный JSON"},
             )
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail={"error": f"Ошибка при обращении к AI: {exc}"},
+                detail={"error": f"Ошибка при обращении к AI"},
             )
 
         for item in spec_dict["input_data"]:
@@ -964,7 +971,7 @@ async def extract_spec(
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={"error": f"Ошибка сохранения спецификации: {exc}"},
+                detail={"error": f"Ошибка сохранения спецификации"},
             )
 
         db.table("projects").update({"status": "extracted"}).eq("id", project_id).execute()
@@ -1070,7 +1077,7 @@ async def extract_spec(
             except Exception as exc:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail={"error": f"Не удалось скачать шаблон из хранилища: {exc}"},
+                    detail={"error": f"Не удалось скачать шаблон из хранилища"},
                 )
             try:
                 doc = Document(io.BytesIO(ct_docx_bytes))
@@ -1079,7 +1086,7 @@ async def extract_spec(
             except Exception as exc:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail={"error": f"Ошибка применения ГОСТ-стилей: {exc}"},
+                    detail={"error": f"Ошибка применения ГОСТ-стилей"},
                 )
             fo_docx_b, fo_pdf_b = _ct_save_and_upload(doc)
             fo_docx_url, fo_pdf_url = _ct_upload_outputs(fo_docx_b, fo_pdf_b)
@@ -1106,14 +1113,14 @@ async def extract_spec(
             except Exception as exc:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail={"error": f"Не удалось скачать шаблон: {exc}"},
+                    detail={"error": f"Не удалось скачать шаблон"},
                 )
             try:
                 me_task_bytes: bytes = db.storage.from_("uploads").download(ct_task_path)
             except Exception as exc:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail={"error": f"Не удалось скачать файл задания: {exc}"},
+                    detail={"error": f"Не удалось скачать файл задания"},
                 )
 
             # Convert template docx → Markdown
@@ -1123,7 +1130,7 @@ async def extract_spec(
             except Exception as exc:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail={"error": f"Ошибка конвертации шаблона в Markdown: {exc}"},
+                    detail={"error": f"Ошибка конвертации шаблона в Markdown"},
                 )
 
             # Extract text from task file
@@ -1134,7 +1141,7 @@ async def extract_spec(
             except Exception as exc:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail={"error": f"Ошибка извлечения текста из задания: {exc}"},
+                    detail={"error": f"Ошибка извлечения текста из задания"},
                 )
             if not me_task_text.strip():
                 raise HTTPException(
@@ -1148,12 +1155,12 @@ async def extract_spec(
             except ValueError as exc:
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail={"error": f"AI вернул некорректный ответ: {exc}"},
+                    detail={"error": f"AI вернул некорректный ответ"},
                 )
             except Exception as exc:
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail={"error": f"Ошибка при обращении к AI: {exc}"},
+                    detail={"error": f"Ошибка при обращении к AI"},
                 )
 
             # Build new docx from AI markdown response
@@ -1164,7 +1171,7 @@ async def extract_spec(
             except Exception as exc:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail={"error": f"Ошибка сборки docx из Markdown: {exc}"},
+                    detail={"error": f"Ошибка сборки docx из Markdown"},
                 )
 
             me_docx_b, me_pdf_b = _ct_save_and_upload(new_doc)
@@ -1253,12 +1260,12 @@ async def extract_spec(
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"error": f"AI вернул некорректный JSON: {exc}"},
+            detail={"error": f"AI вернул некорректный JSON"},
         )
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"error": f"Ошибка при обращении к AI: {exc}"},
+            detail={"error": f"Ошибка при обращении к AI"},
         )
 
     total_input_tokens = ai_result.input_tokens
@@ -1294,12 +1301,12 @@ async def extract_spec(
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail={"error": f"Fallback-модель вернула некорректный JSON: {exc}"},
+                detail={"error": f"Fallback-модель вернула некорректный JSON"},
             )
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail={"error": f"Ошибка при обращении к fallback-модели: {exc}"},
+                detail={"error": f"Ошибка при обращении к fallback-модели"},
             )
 
     # 6. Upsert spec into calculation_specs
@@ -1311,7 +1318,7 @@ async def extract_spec(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": f"Ошибка сохранения спецификации: {exc}"},
+            detail={"error": f"Ошибка сохранения спецификации"},
         )
 
     # 7. Update project status
@@ -1551,7 +1558,7 @@ async def chat_turn(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": f"Ошибка сохранения сообщения: {exc}"},
+            detail={"error": f"Ошибка сохранения сообщения"},
         )
 
     # 5. Build messages list for AI
@@ -1606,7 +1613,7 @@ async def chat_turn(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"error": f"Ошибка при обращении к AI: {exc}"},
+            detail={"error": f"Ошибка при обращении к AI"},
         )
 
     full_response = ai_result.content
@@ -1632,7 +1639,7 @@ async def chat_turn(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": f"Ошибка сборки docx из ответа AI: {exc}"},
+            detail={"error": f"Ошибка сборки docx из ответа AI"},
         )
 
     # 9. Save docx + pdf to outputs (upsert — overwrite previous draft)
@@ -1667,7 +1674,7 @@ async def chat_turn(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": f"Ошибка загрузки черновика в хранилище: {exc}"},
+            detail={"error": f"Ошибка загрузки черновика в хранилище"},
         )
 
     if chat_pdf_bytes:
@@ -1778,7 +1785,7 @@ async def compute(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": f"Ошибка расчёта: {exc}"},
+            detail={"error": f"Ошибка расчёта"},
         )
 
     # 4. Render Jinja2 templates (fixed_template) or generate via AI (universal)
@@ -1902,7 +1909,7 @@ async def generate(
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={"error": f"Ошибка генерации docx: {exc}"},
+                detail={"error": f"Ошибка генерации docx"},
             )
 
         # 5. Convert to .pdf via LibreOffice headless (optional)
@@ -1955,7 +1962,7 @@ async def generate(
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={"error": f"Ошибка загрузки docx в хранилище: {exc}"},
+                detail={"error": f"Ошибка загрузки docx в хранилище"},
             )
 
         # 7. Upload .pdf to Storage (if conversion succeeded)
@@ -1970,7 +1977,7 @@ async def generate(
                     file_options={"content-type": "application/pdf", "upsert": "true"},
                 )
             except Exception as exc:
-                pdf_warning = (pdf_warning or "") + f" Ошибка загрузки PDF: {exc}"
+                pdf_warning = (pdf_warning or "") + f" Ошибка загрузки PDF"
                 pdf_storage_path = None
 
     # 8. Create signed URLs (1 hour)
@@ -1983,7 +1990,7 @@ async def generate(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": f"Не удалось создать ссылку для скачивания docx: {exc}"},
+            detail={"error": f"Не удалось создать ссылку для скачивания docx"},
         )
 
     pdf_url: Optional[str] = None
@@ -2004,6 +2011,23 @@ async def generate(
             "status": "done",
         }
     ).eq("id", project_id).execute()
+
+    # Count each project's first successful generation toward the gost_master
+    # achievement (10 documents). Regenerating an already-done project (status
+    # was already "done") doesn't re-count. Non-fatal — never block the result.
+    if project.get("status") == "computed":
+        try:
+            prof = db.table("profiles").select("gost_uses").eq("id", user_id).single().execute()
+            uses = ((prof.data or {}).get("gost_uses") or 0) + 1
+            db.table("profiles").update({"gost_uses": uses}).eq("id", user_id).execute()
+            if uses >= 10:
+                db.table("achievements").upsert(
+                    {"user_id": user_id, "type": "gost_master"},
+                    on_conflict="user_id,type",
+                    ignore_duplicates=True,
+                ).execute()
+        except Exception:
+            logger.exception("gost_master bookkeeping failed for user %s", user_id)
 
     return GenerateResponse(
         project_id=project_id,
@@ -2065,7 +2089,7 @@ async def format_gost(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": f"Не удалось открыть файл как .docx: {exc}"},
+            detail={"error": f"Не удалось открыть файл как .docx"},
         )
 
     # Consume tokens only after the input is known good.
@@ -2083,7 +2107,7 @@ async def format_gost(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": f"Ошибка применения стилей: {exc}"},
+            detail={"error": f"Ошибка применения стилей"},
         )
 
     buf = io.BytesIO()
