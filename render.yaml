@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: gost-calculator-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      # Production frontend origin (GitHub Pages). Origin is scheme+host only,
+      # without the /Sait/ path. Set as a value (not sync:false) so the backend
+      # never silently falls back to localhost-only CORS and blocks the SPA.
+      - key: CORS_ORIGINS
+        value: https://ks1rex.github.io
+      - key: AI_PROVIDER
+        value: deepseek
+      - key: LIBREOFFICE_PATH
+        value: soffice
