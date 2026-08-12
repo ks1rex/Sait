@@ -11,6 +11,10 @@
 """
 from __future__ import annotations
 
+import ast
+import difflib
+import keyword
+import unicodedata
 from typing import Dict
 
 from asteval import Interpreter
@@ -29,6 +33,100 @@ class CalcError(Exception):
     def __init__(self, step_id: str, message: str):
         super().__init__(f"Ошибка в шаге '{step_id}': {message}")
         self.step_id = step_id
+
+
+# Имена, доступные в формулах помимо переменных спецификации.
+_BUILTIN_NAMES: frozenset[str] = frozenset({
+    'sqrt', 'exp', 'log', 'log10', 'log2', 'sin', 'cos', 'tan', 'asin', 'acos',
+    'atan', 'atan2', 'sinh', 'cosh', 'tanh', 'degrees', 'radians',
+    'ceil', 'floor', 'abs', 'round', 'min', 'max', 'sum', 'pow',
+    'pi', 'e', 'inf', 'True', 'False', 'None', 'interp',
+})
+
+
+def _names_in_formula(formula: str) -> set[str]:
+    """Имена переменных, реально прочитанные Python-парсером из формулы.
+
+    Берём именно ast, а не регулярку: парсер нормализует идентификаторы
+    (NFKC) ровно так же, как это потом сделает asteval, — иначе проверка
+    расходилась бы с расчётом.
+    """
+    tree = ast.parse(formula.strip(), mode='eval')
+    return {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+
+
+def _check_name(name: str, where: str, step_id: str) -> None:
+    """Имя переменной должно быть валидным идентификатором Python.
+
+    Кириллица разрешена (Qсут, К_макс) — запрещены пробелы, точки, запятые,
+    знаки и совпадения с ключевыми словами/функциями.
+    """
+    if not name or not name.isidentifier() or keyword.iskeyword(name):
+        raise CalcError(
+            step_id,
+            f"недопустимое имя переменной '{name}' ({where}): разрешены буквы "
+            "(латиница и кириллица), цифры и «_», имя не может начинаться с цифры "
+            "и содержать пробелы, точки, запятые или знаки",
+        )
+    if unicodedata.normalize('NFKC', name) != name:
+        raise CalcError(
+            step_id,
+            f"имя переменной '{name}' ({where}) содержит нестандартные символы "
+            "(индексы, спецбуквы) — замените их обычными буквами или цифрами",
+        )
+    if name in _BUILTIN_NAMES:
+        raise CalcError(
+            step_id,
+            f"имя переменной '{name}' ({where}) совпадает со встроенной функцией — "
+            "переименуйте переменную",
+        )
+
+
+def validate_spec(spec: CalculationSpec) -> None:
+    """Проверить имена переменных и формулы ДО расчёта.
+
+    Без этого любая опечатка (в т.ч. латинская 'K' вместо русской 'К')
+    всплывала в виде «неизвестная переменная» уже на /compute у пользователя.
+    """
+    known: set[str] = set()
+
+    for item in spec.input_data:
+        _check_name(item.id, 'исходные данные', item.id)
+        if item.id in known:
+            raise CalcError(item.id, f"переменная '{item.id}' объявлена дважды")
+        known.add(item.id)
+
+    for section in spec.sections:
+        for step in section.steps:
+            _check_name(step.id, f"шаг «{step.description or step.id}»", step.id)
+            if step.id in known:
+                raise CalcError(step.id, f"переменная '{step.id}' объявлена дважды")
+            known.add(step.id)
+
+    for section in spec.sections:
+        for step in section.steps:
+            if not step.formula.strip():
+                raise CalcError(step.id, "формула пустая")
+            try:
+                names = _names_in_formula(step.formula)
+            except SyntaxError as exc:
+                raise CalcError(
+                    step.id,
+                    f"формула {step.formula!r} записана с ошибкой: {exc.msg}",
+                )
+            for name in sorted(names - known - _BUILTIN_NAMES):
+                hint = difflib.get_close_matches(name, sorted(known), n=1, cutoff=0.6)
+                raise CalcError(
+                    step.id,
+                    f"в формуле {step.formula!r} используется неизвестная переменная "
+                    f"'{name}'"
+                    + (
+                        f" — возможно, имелась в виду '{hint[0]}' (проверьте раскладку: "
+                        "русские и латинские буквы выглядят одинаково)"
+                        if hint
+                        else "; доступные переменные: " + ", ".join(sorted(known)[:30])
+                    ),
+                )
 
 
 def _make_interp_function(tables_by_id: Dict[str, "TableDef"]):  # noqa: F821
@@ -90,6 +188,8 @@ def run_calculation(spec: CalculationSpec) -> Dict[str, float]:
     идеально заполненным). Реальные ошибки (деление на ноль, неизвестная
     функция) поднимаются сразу.
     """
+    validate_spec(spec)
+
     aeval = Interpreter()
 
     # 1. Загружаем входные данные в namespace

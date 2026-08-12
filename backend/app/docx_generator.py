@@ -27,6 +27,7 @@ from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
 
 
+from .calc_engine import _BUILTIN_NAMES
 from .gost_styles import apply_gost_page_setup, apply_gost_paragraph_styles, apply_table_cell_style
 from .schemas import CalculationSpec
 
@@ -35,10 +36,8 @@ from .schemas import CalculationSpec
 # ---------------------------------------------------------------------------
 
 # Identifiers skipped during formula value substitution
-_FORMULA_SKIP: frozenset[str] = frozenset({
-    'sqrt', 'exp', 'log', 'log10', 'sin', 'cos', 'tan',
-    'ceil', 'floor', 'abs', 'min', 'max', 'pi', 'e', 'interp',
-} | set(keyword.kwlist))
+# (same list the calc engine treats as built-ins — keep one source)
+_FORMULA_SKIP: frozenset[str] = frozenset(_BUILTIN_NAMES | set(keyword.kwlist))
 
 # Tab-stop positions in twips (A4, left=3 cm, right=1 cm → content=17 cm)
 # 1 cm ≈ 567 twips
@@ -222,7 +221,9 @@ def _add_input_data_table(doc: Document, spec: CalculationSpec) -> None:
     # Data rows
     for item in spec.input_data:
         row = table.add_row().cells
-        row[0].text = item.symbol
+        # symbol пуст → печатаем id: в документе обозначение обязано совпадать
+        # с тем, что стоит в формулах.
+        row[0].text = item.symbol or item.id
         row[1].text = item.description
         row[2].text = (
             _fmt_number(float(item.value), 4)
@@ -254,8 +255,10 @@ def _add_formula_row(
     )
     subst = _substitute_values(step.formula, formatted)
     unit = f' {step.unit}'.rstrip()
+    # step.formula печатается ровно как записана в шаблоне — меняются только
+    # цифры в подставленной копии, буквы остаются авторскими.
     formula_line = (
-        f'{step.result_symbol} = {step.formula} = {subst} = {value_str}{unit}'
+        f'{step.result_symbol or step.id} = {step.formula} = {subst} = {value_str}{unit}'
     )
 
     p = doc.add_paragraph()
@@ -317,7 +320,7 @@ def _add_sections(doc: Document, spec: CalculationSpec) -> None:
 
             # Абзац 1: описание величины
             p1 = doc.add_paragraph(
-                f'{step.description}, {step.result_symbol},'
+                f'{step.description}, {step.result_symbol or step.id},'
                 ' рассчитывается по формуле:'
             )
             p1.paragraph_format.first_line_indent = Cm(0)

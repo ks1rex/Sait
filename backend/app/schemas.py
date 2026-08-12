@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field
 
 class InputDatum(BaseModel):
     id: str
-    symbol: str
+    # Пусто → в документе печатается id (обозначение = имя в формулах)
+    symbol: str = ""
     value: Union[float, int, str]
     unit: str = ""
     description: str = ""
@@ -30,8 +31,8 @@ class TableDef(BaseModel):
 
 class Step(BaseModel):
     id: str
-    result_symbol: str
-    description: str
+    result_symbol: str = ""
+    description: str = ""
     formula: str
     unit: str = ""
     rounding: int = 3
