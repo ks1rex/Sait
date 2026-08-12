@@ -9,6 +9,8 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
 from .admin import AdminUser
+from .calc_engine import CalcError, run_calculation
+from .schemas import CalculationSpec
 from .supabase_client import get_supabase
 
 router = APIRouter(prefix="/admin/templates", tags=["admin"])
@@ -81,6 +83,20 @@ async def get_template(template_id: str, admin: AdminUser):
 @router.put("/{template_id}")
 async def update_template(template_id: str, body: TemplateUpdateRequest, admin: AdminUser):
     _manifest_entry(template_id)  # 404 if unknown template
+
+    # A bad formula saved here doesn't fail here — it fails at /compute, for
+    # every user of the template, with no hint of where it came from. Dry-run
+    # the engine on the incoming spec (input_data carries default values, so it
+    # computes end-to-end) and refuse to store one that can't be calculated.
+    try:
+        run_calculation(CalculationSpec.model_validate(body.spec))
+    except CalcError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                             detail={"error": str(exc), "step_id": exc.step_id})
+    except Exception as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                             detail={"error": f"Спецификация не проходит проверку расчётом: {exc}"})
+
     db = get_supabase()
     db.table("gost_template_overrides").upsert({
         "template_id": template_id,
