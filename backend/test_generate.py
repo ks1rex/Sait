@@ -92,6 +92,7 @@ spec = CalculationSpec(
                     result_symbol="Qч",
                     description="Средний часовой расход воды",
                     formula="Q_sut / 24",
+                    formula_display="\\frac{ {{ Q_sut }} }{24}",
                     unit="м³/ч",
                     rounding=3,
                     depends_on=["Q_sut"],
@@ -101,6 +102,7 @@ spec = CalculationSpec(
                     result_symbol="Qс",
                     description="Средний секундный расход воды",
                     formula="Q_sut * 1000 / 86400",
+                    formula_display="\\frac{ {{ Q_sut }} * 1000}{86400}",
                     unit="л/с",
                     rounding=3,
                     depends_on=["Q_sut"],
@@ -110,6 +112,7 @@ spec = CalculationSpec(
                     result_symbol="Qmax.ч",
                     description="Максимальный часовой расход воды",
                     formula="Q_chas * K_max_ch",
+                    formula_display="{{ Q_chas }} * {{ K_max_ch }}",
                     unit="м³/ч",
                     rounding=3,
                     depends_on=["Q_chas", "K_max_ch"],
@@ -119,6 +122,7 @@ spec = CalculationSpec(
                     result_symbol="Qmax.с",
                     description="Максимальный секундный расход воды",
                     formula="Q_max_chas * 1000 / 3600",
+                    formula_display="\\frac{ {{ Q_max_chas }} * 1000}{3600}",
                     unit="л/с",
                     rounding=3,
                     depends_on=["Q_max_chas"],
@@ -136,6 +140,7 @@ spec = CalculationSpec(
                     result_symbol="Dрасч",
                     description="Расчётный диаметр трубопровода",
                     formula="sqrt(4 * Q_max_sek / (1000 * pi * v_ek))",
+                    formula_display="\\sqrt{ \\frac{4 * {{ Q_max_sek }} }{1000 * π * {{ v_ek }} } }",
                     unit="м",
                     rounding=4,
                     explanation=(
@@ -149,6 +154,7 @@ spec = CalculationSpec(
                     result_symbol="D",
                     description="Диаметр трубопровода",
                     formula="D_raschet * 1000",
+                    formula_display="{{ D_raschet }} * 1000",
                     unit="мм",
                     rounding=1,
                     depends_on=["D_raschet"],
@@ -158,6 +164,7 @@ spec = CalculationSpec(
                     result_symbol="h",
                     description="Потери напора на расчётном участке",
                     formula="i_hydr * l_pipe",
+                    formula_display="{{ i_hydr }} * {{ l_pipe }}",
                     unit="м",
                     rounding=3,
                     depends_on=["i_hydr", "l_pipe"],
@@ -167,6 +174,7 @@ spec = CalculationSpec(
                     result_symbol="Hнас",
                     description="Требуемый напор насосной станции",
                     formula="h_poteri + H_sv",
+                    formula_display="{{ h_poteri }} + {{ H_sv }}",
                     unit="м",
                     rounding=2,
                     depends_on=["h_poteri", "H_sv"],
@@ -237,6 +245,20 @@ spec.conclusion_text = (
 print("--- Generatsiya .docx ---")
 generate_docx(spec, META, DOCX_PATH)
 print(f"   Saved: {DOCX_PATH}")
+
+# formula_display dolzhna dat nativnyye ob"yekty-formuly Word (m:oMath) v
+# "professional'nom" vide: nastoyashchaya drob' (m:f) i koren' (m:rad), ne
+# tekstovyye '/' i 'sqrt(...)', plyus podstrochnyy indeks (m:sSub) kak posle Alt+=
+import zipfile
+with zipfile.ZipFile(DOCX_PATH) as zf:
+    document_xml = zf.read("word/document.xml").decode("utf-8")
+checks = {"m:oMath": "oMath", "m:sSub": "subscript", "m:f": "fraction", "m:rad": "radical (sqrt)"}
+missing = [name for tag, name in checks.items() if tag not in document_xml]
+if not missing:
+    print("   [OK]  formula_display -> native m:oMath with fraction/radical/subscript found")
+else:
+    print(f"   [FAIL] missing from formula_display output: {missing}")
+    sys.exit(1)
 
 # ── конвертация в PDF ────────────────────────────────────────────────────────
 print("--- Konvertatsiya v PDF ---")

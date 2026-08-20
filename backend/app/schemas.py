@@ -34,6 +34,11 @@ class Step(BaseModel):
     result_symbol: str = ""
     description: str = ""
     formula: str
+    # Шаблон для печати в docx, независимый от formula (которую парсит asteval).
+    # {{ id }} — подставить значение/символ переменной, _{...}/^{...} — под-/
+    # надстрочный текст, остальное — обычный текст (можно писать любые
+    # спецсимволы напрямую). Пусто → печатается по formula, как раньше.
+    formula_display: str = ""
     unit: str = ""
     rounding: int = 3
     explanation: str = ""

@@ -258,6 +258,15 @@ def run_calculation(spec: CalculationSpec) -> Dict[str, float]:
     return results
 
 
+def render_display_template(template_str: str, context: Dict[str, str]) -> str:
+    """
+    Render a {{ id }}-style Jinja2 template (sandboxed) against a pre-built
+    string context. Shared by render_text_template (intro/conclusion) and
+    docx_generator's per-step formula_display rendering.
+    """
+    return _sandbox.from_string(template_str).render(**context)
+
+
 def render_text_template(
     template_str: str,
     spec: CalculationSpec,
@@ -283,4 +292,4 @@ def render_text_template(
         for var_id, value in results.items()
     }
 
-    return _sandbox.from_string(template_str).render(**context)
+    return render_display_template(template_str, context)

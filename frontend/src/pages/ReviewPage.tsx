@@ -5,6 +5,52 @@ import { apiGet, apiPut, apiPost } from '../lib/api'
 import { useToast } from '../components/Toast'
 import type { CalculationSpec, InputDataItem, CalculationStep } from '../types'
 
+// ── Переименование переменной ────────────────────────────────────────────────
+// id переменной = её обозначение в документе. Правка одного symbol оставляла id
+// старым, формулы продолжали ссылаться на него, и /compute падал с
+// «неизвестная переменная». Правила имени — как в calc_engine._check_name.
+const LETTER = 'A-Za-zА-Яа-яЁё\\u0370-\\u03FF_'
+const NAME_CHAR = `[${LETTER}0-9]`
+const NAME_RE = new RegExp(`^[${LETTER}]${NAME_CHAR}*$`)
+
+function renameVar(spec: CalculationSpec, oldId: string, newId: string): CalculationSpec {
+  const re = new RegExp(
+    `(?<!${NAME_CHAR})${oldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!${NAME_CHAR})`,
+    'g',
+  )
+  const rw = <T extends string | null>(t: T): T => (t ? (t.replace(re, newId) as T) : t)
+  return {
+    ...spec,
+    intro_text_template: rw(spec.intro_text_template),
+    conclusion_text_template: rw(spec.conclusion_text_template),
+    input_data: spec.input_data.map(d => (d.id === oldId ? { ...d, id: newId, symbol: newId } : d)),
+    sections: spec.sections.map(sec => ({
+      ...sec,
+      steps: sec.steps.map(st => {
+        const s = st.id === oldId ? { ...st, id: newId, result_symbol: newId } : st
+        return { ...s, formula: rw(s.formula), explanation: rw(s.explanation) }
+      }),
+    })),
+  }
+}
+
+/** Поле обозначения: правка применяется по blur/Enter, отклонённая — откатывается. */
+function IdCell({ value, onCommit, className }: {
+  value: string; onCommit: (v: string) => boolean; className: string
+}) {
+  const [draft, setDraft] = useState(value)
+  useEffect(() => { setDraft(value) }, [value])
+  return (
+    <input
+      value={draft}
+      onChange={e => setDraft(e.target.value)}
+      onBlur={() => { if (!onCommit(draft.trim())) setDraft(value) }}
+      onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+      className={className}
+    />
+  )
+}
+
 export function ReviewPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -33,6 +79,24 @@ export function ReviewPage() {
       input_data[idx] = { ...input_data[idx], [field]: field === 'value' ? Number(value) || value : value }
       return { ...prev, input_data }
     })
+  }
+
+  const renameVarId = (oldId: string, newId: string): boolean => {
+    if (!spec || !newId || newId === oldId) return false
+    if (!NAME_RE.test(newId)) {
+      toast('Обозначение: только буквы (можно русские), цифры и «_», без пробелов и точек', 'error')
+      return false
+    }
+    const taken = [
+      ...spec.input_data.map(d => d.id),
+      ...spec.sections.flatMap(sec => sec.steps.map(st => st.id)),
+    ]
+    if (taken.includes(newId)) {
+      toast(`Переменная «${newId}» уже есть`, 'error')
+      return false
+    }
+    setSpec(renameVar(spec, oldId, newId))
+    return true
   }
 
   const updateStep = (secIdx: number, stepIdx: number, field: keyof CalculationStep, value: string) => {
@@ -151,9 +215,9 @@ export function ReviewPage() {
               {spec.input_data.map((item, i) => (
                 <tr key={item.id} className="border-b border-slate-700/50 hover:bg-navy/30">
                   <td className="px-4 py-2">
-                    <input
-                      value={item.symbol}
-                      onChange={e => updateInput(i, 'symbol', e.target.value)}
+                    <IdCell
+                      value={item.id}
+                      onCommit={v => renameVarId(item.id, v)}
                       className="bg-transparent border border-transparent hover:border-slate-600 focus:border-accent
                         rounded px-2 py-1 w-full outline-none text-slate-200 text-xs font-mono"
                     />
@@ -218,7 +282,14 @@ export function ReviewPage() {
                   <tbody>
                     {sec.steps.map((step, ti) => (
                       <tr key={step.id} className="border-b border-slate-700/50 hover:bg-navy/30">
-                        <td className="px-4 py-2 font-mono text-xs text-accent">{step.result_symbol}</td>
+                        <td className="px-4 py-2">
+                          <IdCell
+                            value={step.id}
+                            onCommit={v => renameVarId(step.id, v)}
+                            className="bg-transparent border border-transparent hover:border-slate-600 focus:border-accent
+                              rounded px-2 py-1 w-full outline-none text-accent text-xs font-mono"
+                          />
+                        </td>
                         <td className="px-4 py-2">
                           <input
                             value={step.description}

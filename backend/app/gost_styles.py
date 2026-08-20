@@ -117,6 +117,58 @@ def apply_table_cell_style(cell) -> None:
             run.font.size = GOST_TABLE_PT
 
 
+def apply_page_numbering(doc: Document) -> None:
+    """
+    Сквозная нумерация страниц (низ страницы, по центру), Times New Roman 14 —
+    номер не печатается на титульном листе (ГОСТ), но считается: страница
+    "Содержание" сразу после него показывает "2". Сквозная — т.к. в документе
+    одна секция, счётчик PAGE не сбрасывается, ничего дополнительно настраивать
+    не нужно.
+    """
+    section = doc.sections[0]
+    section.different_first_page_header_footer = True
+
+    footer = section.footer
+    footer.is_linked_to_previous = False
+    p = footer.paragraphs[0]
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.first_line_indent = Cm(0)
+    _add_page_field(p)
+
+    # Пустой footer первой страницы (титульный лист) — номер не печатается.
+    first_footer = section.first_page_footer
+    first_footer.is_linked_to_previous = False
+
+
+def _add_page_field(paragraph) -> None:
+    """Вставляет поле PAGE (номер текущей страницы) шрифтом ГОСТ 14 пт."""
+    run = paragraph.add_run()
+    run.font.name = GOST_FONT  # creates w:rPr/w:rFonts with ascii+hAnsi
+    run.font.size = GOST_BODY_PT
+
+    rFonts = run._r.rPr.rFonts  # same element font.name just created
+    for attr in ('w:eastAsia', 'w:cs'):
+        rFonts.set(qn(attr), GOST_FONT)
+
+    fld_begin = OxmlElement('w:fldChar')
+    fld_begin.set(qn('w:fldCharType'), 'begin')
+
+    instr = OxmlElement('w:instrText')
+    instr.set(qn('xml:space'), 'preserve')
+    instr.text = ' PAGE '
+
+    fld_sep = OxmlElement('w:fldChar')
+    fld_sep.set(qn('w:fldCharType'), 'separate')
+
+    fld_end = OxmlElement('w:fldChar')
+    fld_end.set(qn('w:fldCharType'), 'end')
+
+    run._r.append(fld_begin)
+    run._r.append(instr)
+    run._r.append(fld_sep)
+    run._r.append(fld_end)
+
+
 def apply_gost_styles(doc: Document) -> None:
     """
     Apply all GOST styles to the document:
